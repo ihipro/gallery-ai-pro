@@ -39,3 +39,6 @@ data/thumbs/
 # Environment secrets
 .env
 .env.*
+
+# gallery database
+data/gallery.db
