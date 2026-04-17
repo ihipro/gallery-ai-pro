@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QToolButton, QDialog, QApplication, QProgressBar,
     QButtonGroup
 )
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint
 from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
 import os
 
@@ -33,16 +33,19 @@ class GalleryPanel(QWidget):
     photo_selected = Signal(str)
     stats_changed  = Signal(int, int)
     location_changed = Signal(str)
+    state_changed = Signal()
     GRID_CARD_WIDTH = 172
     COMPACT_CARD_WIDTH = 92
 
     def __init__(self):
         super().__init__()
         self.photos: list[dict] = []
+        self._photo_paths_cache: set[str] = set()
         self.filtered: list[dict] = []
         self._subfolders: list[str] = []
         self.view_mode      = "grid"
         self.active_filter  = "all"
+        self.hover_enabled  = True
         self.current_folder = None
         self._cards: dict[str, 'PhotoCard'] = {}
         self._list_rows: dict[str, 'ListRow'] = {}
@@ -115,6 +118,8 @@ class GalleryPanel(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("🔍  Cari nama foto...")
         self.search.setFixedWidth(200)
+        # Autosave saat pencarian berhenti diketik (via state_changed)
+        self.search.textChanged.connect(lambda: QTimer.singleShot(500, self.state_changed.emit))
         self.search.textChanged.connect(self._apply_filter)
         L.addWidget(self.search)
 
@@ -126,6 +131,7 @@ class GalleryPanel(QWidget):
             "📦 Ukuran (terbesar)","📦 Ukuran (terkecil)",
         ])
         self.sort_combo.currentIndexChanged.connect(self._apply_filter)
+        self.sort_combo.currentIndexChanged.connect(self.state_changed)
         L.addWidget(self.sort_combo)
 
         # FIX: Mutually exclusive view buttons via QButtonGroup
@@ -172,6 +178,17 @@ class GalleryPanel(QWidget):
             btn.clicked.connect(lambda chk=False, k=key: self._set_filter(k))
             L.addWidget(btn); self.filter_btns[key] = btn
         self.filter_btns["all"].setChecked(True)
+
+        L.addSpacing(10)
+        self.btn_hover = QPushButton("👁️ Preview")
+        self.btn_hover.setCheckable(True)
+        self.btn_hover.setChecked(self.hover_enabled)
+        self.btn_hover.setFixedHeight(24)
+        self.btn_hover.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_hover.setStyleSheet(FSTYLE)
+        self.btn_hover.clicked.connect(self._toggle_hover)
+        L.addWidget(self.btn_hover)
+
         L.addStretch()
         self.lbl_count = QLabel("0 foto"); self.lbl_count.setObjectName("labelMuted")
         L.addWidget(self.lbl_count)
@@ -189,6 +206,8 @@ class GalleryPanel(QWidget):
         self.grid_layout.setContentsMargins(12,12,12,12); self.grid_layout.setSpacing(8)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.scroll.setWidget(self.grid_widget)
+        # Simpan state saat scroll manual dilepas
+        self.scroll.verticalScrollBar().sliderReleased.connect(self.state_changed)
         return self.scroll
 
     # ── Load ──────────────────────────────────────
@@ -219,7 +238,7 @@ class GalleryPanel(QWidget):
         self._is_drives_view = False   # ← leaving drives view
 
         # Always reset so old photos never bleed into new folder
-        self.photos = []; self._cards.clear()
+        self.photos = []; self._cards.clear(); self._photo_paths_cache = set()
 
         # Subfolders for navigation
         self._subfolders = self._get_subfolders(folder)
@@ -228,6 +247,7 @@ class GalleryPanel(QWidget):
         db_photos = get_photos_in_folder(folder)
         if db_photos:
             self.photos = db_photos
+            self._photo_paths_cache = {p['path'] for p in db_photos}
 
         self._apply_filter()
         self._start_scan(folder)
@@ -325,8 +345,9 @@ class GalleryPanel(QWidget):
                     'file_size':os.path.getsize(path),
                     'added_at':datetime.now().isoformat(),'tags':{},'exif_data':{}}
             upsert_photo(meta)
-            if not any(p['path']==path for p in self.photos):
+            if path not in self._photo_paths_cache:
                 self.photos.append(meta)
+                self._photo_paths_cache.add(path)
         self._apply_filter()
 
     def _start_scan(self, folder: str):
@@ -366,12 +387,27 @@ class GalleryPanel(QWidget):
     def _on_photo_found(self, token: int, meta: dict):
         if token != self._scan_token:
             return
-        if not any(p['path']==meta['path'] for p in self.photos):
+        
+        path = meta['path']
+        # Cepat: gunakan set() untuk cek duplikasi, bukan loop any()
+        if path not in self._photo_paths_cache:
             self.photos.append(meta)
-            # FIX: Update immediately for first 10, then every 5
+            self._photo_paths_cache.add(path)
+            
             n = len(self.photos)
-            if n <= 10 or n % 5 == 0:
+            # Progressive Rendering:
+            # 10 foto pertama ditampilkan langsung satu per satu.
+            # Setelah itu, UI hanya di-refresh setiap 25 foto baru untuk efisiensi.
+            if n <= 10 or n % 25 == 0:
                 self._apply_filter()
+
+            # Jika item yang dicari ditemukan selama scan, paksa render dan gulir ke sana
+            if self._pending_restore_selection == path:
+                self._pending_restore_scroll = None
+                self._apply_filter()
+                self._restore_selection_state()
+            else:
+                self.lbl_count.setText(f"Memindai... {n} foto ditemukan")
 
     def _on_scan_done(self, token: int, total: int):
         if token != self._scan_token:
@@ -390,12 +426,19 @@ class GalleryPanel(QWidget):
             len(self.photos),
             sum(1 for p in self.photos if p.get('tagged'))
         )
+        # Pastikan seleksi tetap dipulihkan jika belum terpilih selama scan
+        self._restore_selection_state()
         self._restore_pending_scroll(finalize=True)
+
+    def _toggle_hover(self, checked: bool):
+        self.hover_enabled = checked
+        self.state_changed.emit()
 
     # ── Filter / View ─────────────────────────────
     def _set_filter(self, key: str):
         for k,b in self.filter_btns.items(): b.setChecked(k==key)
         self.active_filter = key; self._apply_filter()
+        self.state_changed.emit()
 
     def _set_view(self, mode: str):
         self.view_mode = mode
@@ -405,6 +448,7 @@ class GalleryPanel(QWidget):
             self._show_drives_view()
         else:
             self._render_grid()
+        self.state_changed.emit()
 
     def _apply_filter(self):
         q = self.search.text().lower()
@@ -470,7 +514,7 @@ class GalleryPanel(QWidget):
                     self._item_pos[photo['path']] = (row, 0)
                     w.clicked.connect(lambda p=photo, ww=w: self._select(p['path'], ww))
                     w.double_clicked.connect(lambda p=photo, idx=i: self._card_click(p, idx))
-                    w.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']))
+                    w.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']) if self.hover_enabled else None)
                     self._list_rows[photo['path']] = w
                     self.grid_layout.addWidget(w, row, 0)
                     self.thumb_loader.request(photo['path']); row+=1
@@ -513,7 +557,7 @@ class GalleryPanel(QWidget):
                 self._item_pos[photo['path']] = (r, c)
                 card.clicked.connect(lambda p=photo, w=card: self._select(p['path'], w))
                 card.double_clicked.connect(lambda p=photo, i=pidx: self._card_click(p, i))
-                card.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']))
+                card.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']) if self.hover_enabled else None)
                 card.fav_toggled.connect(self._on_fav)
                 self._cards[photo['path']] = card
                 self.grid_layout.addWidget(card, r, c)
@@ -565,6 +609,7 @@ class GalleryPanel(QWidget):
             "selected_path": selected_path,
             "view_mode": self.view_mode,
             "active_filter": self.active_filter,
+            "hover_enabled": self.hover_enabled,
             "search_text": self.search.text(),
             "sort_index": self.sort_combo.currentIndex(),
             "scroll_x": self.scroll.horizontalScrollBar().value(),
@@ -586,6 +631,11 @@ class GalleryPanel(QWidget):
             self.active_filter = active_filter
             for key, btn in self.filter_btns.items():
                 btn.setChecked(key == active_filter)
+
+        hover_enabled = state.get("hover_enabled", True)
+        self.hover_enabled = hover_enabled
+        if hasattr(self, 'btn_hover'):
+            self.btn_hover.setChecked(hover_enabled)
 
         sort_index = state.get("sort_index")
         if isinstance(sort_index, int) and 0 <= sort_index < self.sort_combo.count():
@@ -618,16 +668,41 @@ class GalleryPanel(QWidget):
             self._restore_pending_scroll(finalize=False)
 
     def _restore_selection_state(self):
-        target = self._pending_restore_selection or self._sel_path
-        if not target:
+        # Prioritaskan path yang sedang direstorasi, jika tidak ada gunakan yang terakhir dipilih
+        path = self._pending_restore_selection or self._sel_path
+        if not path:
             return
-        path = target
+
         widget = (self._cards.get(path) or self._list_rows.get(path)
                   or self._folder_widgets.get(path))
+
         if widget:
+            # Sorot widget secara visual (widget=None agar tidak double scroll)
+            self._select(path, widget=None)
+
+            # Jika sedang memulihkan seleksi (setelah startup atau pindah folder)
             if self._pending_restore_selection == path:
+                self._pending_restore_scroll = None
+                
+                # Memaksa kontainer untuk sinkronisasi geometri. Tanpa ini, 
+                # ensureWidgetVisible sering gagal karena tinggi widget dianggap 0.
+                self.grid_widget.adjustSize()
+
+                # NOTE: Revisit later. In very large folders, ensureWidgetVisible 
+                # sometimes fails to align correctly due to layout race conditions.
+                def perform_scroll():
+                    try:
+                        # Check if widget still exists and is visible
+                        if not widget.isHidden():
+                            self.scroll.ensureWidgetVisible(widget, 50, 150)
+                    except RuntimeError:
+                        # Occurs if widget was deleted (e.g. folder changed) before timer fired
+                        pass
+                
+                QTimer.singleShot(500, perform_scroll)
                 self._pending_restore_selection = None
-            self._select(path, widget)
+            return True
+        return False
 
     def _restore_pending_scroll(self, finalize: bool):
         if self._pending_restore_scroll is None:
@@ -638,7 +713,7 @@ class GalleryPanel(QWidget):
             self.scroll.horizontalScrollBar().setValue(sx)
             self.scroll.verticalScrollBar().setValue(sy)
 
-        QTimer.singleShot(0, apply)
+        QTimer.singleShot(100, apply)
         if finalize:
             self._pending_restore_scroll = None
 
@@ -665,6 +740,10 @@ class GalleryPanel(QWidget):
             self._nav_back(); return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
             self._move_sel(key); return
+        if key == Qt.Key.Key_Home:
+            self._jump_to_index(0); return
+        if key == Qt.Key.Key_End:
+            self._jump_to_index(len(self._all_items) - 1); return
         if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
             self._page_move(key); return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -723,6 +802,14 @@ class GalleryPanel(QWidget):
              or self._folder_widgets.get(path))
         self._select(path, w)
 
+    def _jump_to_index(self, idx: int):
+        if not self._all_items or idx < 0 or idx >= len(self._all_items): return
+        t, d = self._all_items[idx]
+        path = d if t == 'f' else d['path']
+        w = (self._cards.get(path) or self._list_rows.get(path)
+             or self._folder_widgets.get(path))
+        self._select(path, w)
+
     def _page_move(self, key):
         if not self._all_items:
             return
@@ -761,8 +848,15 @@ class GalleryPanel(QWidget):
                 break
 
     def _card_click(self, photo: dict, index: int):
-        self.photo_selected.emit(photo['path'])
-        lb = Lightbox(self.filtered, index, self); lb.exec()
+        lb = Lightbox(self.filtered, index, self)
+        lb.exec()
+        
+        # Sinkronisasi posisi seleksi setelah Lightbox ditutup
+        if 0 <= lb.current < len(self.filtered):
+            target_photo = self.filtered[lb.current]
+            path = target_photo['path']
+            widget = self._cards.get(path) or self._list_rows.get(path)
+            self._select(path, widget)
 
     def _on_fav(self, path: str):
         new = toggle_fav(path)
@@ -948,15 +1042,59 @@ class ListRow(QFrame):
     def enterEvent(self, e): self.hovered.emit()
 
 
+# ── Lightbox Clickable Label ────────────────────────────────────────────────
+class LightboxClickableLabel(QLabel):
+    clicked_at = Signal(QPoint)
+    dragged = Signal(QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_pos = QPoint()
+        self._press_pos = QPoint()
+        self._is_drag_mode = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.pos()
+            self._last_pos = event.pos()
+            self._is_drag_mode = False
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            # Jika pergerakan lebih dari 5 pixel, aktifkan mode drag
+            if (event.pos() - self._press_pos).manhattanLength() > 5:
+                self._is_drag_mode = True
+            
+            delta = event.pos() - self._last_pos
+            self.dragged.emit(delta)
+            # Update last_pos secara manual untuk kelancaran drag di scroll area
+            self._last_pos = self.mapFromGlobal(QCursor.pos())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            if not self._is_drag_mode:
+                self.clicked_at.emit(event.pos())
+        super().mouseReleaseEvent(event)
+
+
 # ── Lightbox ──────────────────────────────────────
 class Lightbox(QDialog):
     def __init__(self, photos: list[dict], index: int, parent=None):
         super().__init__(parent)
         self.photos=photos; self.current=index
+        self._zoom_level = 0  # 0: Fit, 1: 100%
+        
+        # Pastikan dialog bisa menerima input keyboard dengan baik
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
         self.setWindowFlags(Qt.WindowType.Dialog|Qt.WindowType.FramelessWindowHint)
         self.setModal(True); self.setStyleSheet("background-color:rgba(0,0,0,0.95);")
         self.setGeometry(QApplication.primaryScreen().geometry())
-        self._build(); self._show()
+        self._build()
 
     def _build(self):
         L=QVBoxLayout(self); L.setContentsMargins(0,0,0,0); L.setSpacing(0)
@@ -970,21 +1108,41 @@ class Lightbox(QDialog):
         close.setStyleSheet("QPushButton{background:rgba(255,255,255,.08);border:none;"
             "border-radius:16px;color:#fff;font-size:14px;}"
             "QPushButton:hover{background:rgba(255,255,255,.2);}")
+        close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         close.clicked.connect(self.close); TL.addWidget(close); L.addWidget(top)
-        self.img=QLabel(); self.img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll.setStyleSheet("background:transparent;")
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.img=LightboxClickableLabel()
+        self.img.clicked_at.connect(self._on_click_zoom)
+        self.img.dragged.connect(self._on_drag)
+        self.img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.img.setStyleSheet("background:transparent;")
-        self.img.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
-        L.addWidget(self.img)
+        self.scroll.setWidget(self.img)
+        L.addWidget(self.scroll)
+
         bot=QWidget(); bot.setFixedHeight(54); bot.setStyleSheet("background:rgba(0,0,0,0.6);")
         BL=QHBoxLayout(bot); BL.setContentsMargins(16,0,16,0); BL.setSpacing(8)
         BTN=("QPushButton{background:rgba(255,255,255,.08);border:none;"
              "border-radius:6px;color:#fff;padding:6px 16px;font-size:12px;}"
              "QPushButton:hover{background:rgba(255,255,255,.18);}")
+        
+        # SetFocusPolicy(NoFocus) agar tombol panah keyboard tidak 'terjebak' di tombol UI
         bp=QPushButton("◀  Sebelumnya"); bp.setStyleSheet(BTN); bp.clicked.connect(self._prev)
+        bp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bn=QPushButton("Berikutnya  ▶"); bn.setStyleSheet(BTN); bn.clicked.connect(self._next)
+        bn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
         BL.addWidget(bp); BL.addWidget(bn); BL.addStretch()
         self.lbl_meta=QLabel(""); self.lbl_meta.setStyleSheet("color:#5a5a90;font-size:11px;")
         BL.addWidget(self.lbl_meta); L.addWidget(bot)
+        self.setFocus()
 
     def _show(self):
         if not self.photos: return
@@ -998,22 +1156,93 @@ class Lightbox(QDialog):
         self.lbl_meta.setText("  ·  ".join(parts))
         pix=QPixmap(p['path'])
         if not pix.isNull():
-            w=self.width()-32; h=self.height()-112
-            self.img.setPixmap(pix.scaled(w,h,Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            if self._zoom_level == 1:
+                # Mode 100%
+                scaled = pix
+            else:
+                # Mode Fit
+                w=self.scroll.viewport().width(); h=self.scroll.viewport().height()
+                scaled = pix.scaled(w,h,Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+            
+            self.img.setPixmap(scaled)
         else:
             self.img.setText("⚠️ Tidak bisa memuat gambar")
 
+    def _on_click_zoom(self, pos: QPoint):
+        if not self.img.pixmap(): return
+
+        # Hitung koordinat relatif sebelum zoom berubah
+        label_w, label_h = self.img.width(), self.img.height()
+        pix_w, pix_h = self.img.pixmap().width(), self.img.pixmap().height()
+        offset_x = (label_w - pix_w) // 2
+        offset_y = (label_h - pix_h) // 2
+        
+        rel_x = (pos.x() - offset_x) / pix_w
+        rel_y = (pos.y() - offset_y) / pix_h
+
+        # Siklus: Fit -> 100% -> Fit
+        self._zoom_level = (self._zoom_level + 1) % 2
+        self._show()
+
+        if self._zoom_level == 1:
+            self.img.adjustSize()
+            new_pix_w = self.img.pixmap().width()
+            new_pix_h = self.img.pixmap().height()
+            
+            target_x = int(rel_x * new_pix_w)
+            target_y = int(rel_y * new_pix_h)
+            
+            view_w = self.scroll.viewport().width()
+            view_h = self.scroll.viewport().height()
+            
+            self.scroll.horizontalScrollBar().setValue(target_x - view_w // 2)
+            self.scroll.verticalScrollBar().setValue(target_y - view_h // 2)
+
+    def _on_drag(self, delta: QPoint):
+        if self._zoom_level == 0: return
+        h_bar = self.scroll.horizontalScrollBar()
+        v_bar = self.scroll.verticalScrollBar()
+        h_bar.setValue(h_bar.value() - delta.x())
+        v_bar.setValue(v_bar.value() - delta.y())
+        # Update last_pos di label agar drag terasa mulus
+        self.img._last_pos = self.img.mapFromGlobal(QCursor.pos())
+
     def _prev(self):
-        if self.current>0: self.current-=1; self._show()
+        if self.current > 0:
+            self.current -= 1
+            self._zoom_level = 0  # Reset zoom saat ganti foto
+            self._show()
     def _next(self):
-        if self.current<len(self.photos)-1: self.current+=1; self._show()
+        if self.current < len(self.photos) - 1:
+            self.current += 1
+            self._zoom_level = 0  # Reset zoom saat ganti foto
+            self._show()
+
+    def resizeEvent(self, e):
+        if self.isVisible():
+            self._show()  # Rescale gambar jika ukuran jendela berubah
+        super().resizeEvent(e)
+
+    def showEvent(self, e):
+        """Dipanggil saat dialog muncul pertama kali di layar."""
+        super().showEvent(e)
+        # Panggil _show di sini agar viewport scroll area sudah memiliki ukuran yang benar
+        QTimer.singleShot(0, self._show)
+
     def keyPressEvent(self, e: QKeyEvent):
         k=e.key()
-        if k==Qt.Key.Key_Left:   self._prev()
-        elif k==Qt.Key.Key_Right: self._next()
-        elif k in (Qt.Key.Key_Escape,Qt.Key.Key_Space): self.close()
-        else: super().keyPressEvent(e)
+        if k == Qt.Key.Key_Left:
+            self._prev()
+            e.accept()
+        elif k == Qt.Key.Key_Right:
+            self._next()
+            e.accept()
+        elif k in (Qt.Key.Key_Escape, Qt.Key.Key_Space):
+            self.close()
+            e.accept()
+        else:
+            super().keyPressEvent(e)
 
 
 # ── Drive Card ───────────────────────────────────────────────────────────────

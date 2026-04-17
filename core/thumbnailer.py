@@ -14,6 +14,8 @@ import hashlib
 from pathlib import Path
 from PIL import Image, ImageOps
 
+Image.MAX_IMAGE_PIXELS = 100_000_000  # Lindungi dari file yang terlalu besar
+
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from core.database import get_thumb_path, save_thumb_path
@@ -313,8 +315,9 @@ class FolderScanWorker(QRunnable):
     @staticmethod
     def _gps_to_decimal(dms, ref) -> float | None:
         """Convert GPS DMS tuple (may contain IFDRational/Fraction) to decimal float."""
+        if not dms or len(dms) < 3:
+            return None
         try:
-            # Each of d, m, s may be IFDRational or Fraction — coerce to float
             d = float(dms[0])
             m = float(dms[1])
             s = float(dms[2])

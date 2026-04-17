@@ -7,6 +7,7 @@ import sqlite3
 import json
 import os
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -20,6 +21,14 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")   # better concurrent read perf
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+@contextmanager
+def db_session():
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -84,59 +93,58 @@ def init_db():
 
 def upsert_photo(photo: dict) -> int:
     """Insert or update a photo record. Returns photo id."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO photos
-            (path, name, folder, file_size, modified_at, img_w, img_h,
-             date_taken, camera, gps_lat, gps_lng,
-             added_at, tagged, ai_tagged, fav, note, tags, face_names, exif_data)
-        VALUES
-            (:path, :name, :folder, :file_size, :modified_at, :img_w, :img_h,
-             :date_taken, :camera, :gps_lat, :gps_lng,
-             :added_at, :tagged, :ai_tagged, :fav, :note, :tags, :face_names, :exif_data)
-        ON CONFLICT(path) DO UPDATE SET
-            name       = excluded.name,
-            file_size  = excluded.file_size,
-            modified_at = excluded.modified_at,
-            img_w      = excluded.img_w,
-            img_h      = excluded.img_h,
-            date_taken = excluded.date_taken,
-            camera     = excluded.camera,
-            gps_lat    = excluded.gps_lat,
-            gps_lng    = excluded.gps_lng,
-            tagged     = excluded.tagged,
-            ai_tagged  = excluded.ai_tagged,
-            fav        = excluded.fav,
-            note       = excluded.note,
-            tags       = excluded.tags,
-            face_names = excluded.face_names,
-            exif_data  = excluded.exif_data
-    """, {
-        'path':       photo['path'],
-        'name':       photo.get('name', os.path.basename(photo['path'])),
-        'folder':     str(Path(photo['path']).parent),
-        'file_size':  photo.get('file_size', 0),
-        'modified_at': photo.get('modified_at', 0),
-        'img_w':      photo.get('img_w', 0),
-        'img_h':      photo.get('img_h', 0),
-        'date_taken': photo.get('date_taken'),
-        'camera':     photo.get('camera'),
-        'gps_lat':    photo.get('gps_lat'),
-        'gps_lng':    photo.get('gps_lng'),
-        'added_at':   photo.get('added_at', datetime.now().isoformat()),
-        'tagged':     int(photo.get('tagged', False)),
-        'ai_tagged':  int(photo.get('ai_tagged', False)),
-        'fav':        int(photo.get('fav', False)),
-        'note':       photo.get('note', ''),
-        'tags':       json.dumps(photo.get('tags', {})),
-        'face_names': json.dumps(photo.get('face_names', [])),
-        'exif_data':  json.dumps(photo.get('exif_data', {})),
-    })
-    photo_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return photo_id
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO photos
+                (path, name, folder, file_size, modified_at, img_w, img_h,
+                 date_taken, camera, gps_lat, gps_lng,
+                 added_at, tagged, ai_tagged, fav, note, tags, face_names, exif_data)
+            VALUES
+                (:path, :name, :folder, :file_size, :modified_at, :img_w, :img_h,
+                 :date_taken, :camera, :gps_lat, :gps_lng,
+                 :added_at, :tagged, :ai_tagged, :fav, :note, :tags, :face_names, :exif_data)
+            ON CONFLICT(path) DO UPDATE SET
+                name       = excluded.name,
+                file_size  = excluded.file_size,
+                modified_at = excluded.modified_at,
+                img_w      = excluded.img_w,
+                img_h      = excluded.img_h,
+                date_taken = excluded.date_taken,
+                camera     = excluded.camera,
+                gps_lat    = excluded.gps_lat,
+                gps_lng    = excluded.gps_lng,
+                tagged     = excluded.tagged,
+                ai_tagged  = excluded.ai_tagged,
+                fav        = excluded.fav,
+                note       = excluded.note,
+                tags       = excluded.tags,
+                face_names = excluded.face_names,
+                exif_data  = excluded.exif_data
+        """, {
+            'path':       photo['path'],
+            'name':       photo.get('name', os.path.basename(photo['path'])),
+            'folder':     str(Path(photo['path']).parent),
+            'file_size':  photo.get('file_size', 0),
+            'modified_at': photo.get('modified_at', 0),
+            'img_w':      photo.get('img_w', 0),
+            'img_h':      photo.get('img_h', 0),
+            'date_taken': photo.get('date_taken'),
+            'camera':     photo.get('camera'),
+            'gps_lat':    photo.get('gps_lat'),
+            'gps_lng':    photo.get('gps_lng'),
+            'added_at':   photo.get('added_at', datetime.now().isoformat()),
+            'tagged':     int(photo.get('tagged', False)),
+            'ai_tagged':  int(photo.get('ai_tagged', False)),
+            'fav':        int(photo.get('fav', False)),
+            'note':       photo.get('note', ''),
+            'tags':       json.dumps(photo.get('tags', {})),
+            'face_names': json.dumps(photo.get('face_names', [])),
+            'exif_data':  json.dumps(photo.get('exif_data', {})),
+        })
+        photo_id = cur.lastrowid
+        conn.commit()
+        return photo_id
 
 
 def get_photos_in_folder(folder: str) -> list[dict]:

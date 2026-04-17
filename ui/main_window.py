@@ -28,6 +28,12 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 680)
         self.resize(1400, 860)
         self.setStyleSheet(DARK_THEME)
+
+        # Timer untuk debounced autosave (2 detik setelah perubahan terakhir)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._save_window_state)
+
         self._build_ui()
         self._build_statusbar()
         self._wire_signals()
@@ -100,14 +106,21 @@ class MainWindow(QMainWindow):
             self.left_panel.show_preview)
         self.content.gallery.location_changed.connect(
             self.left_panel.sync_to_path)
+        self.content.gallery.location_changed.connect(self._request_autosave)
+        self.content.gallery.state_changed.connect(self._request_autosave)
 
         # Gallery stats → statusbar
         self.content.gallery.stats_changed.connect(self._update_stats)
         self.h_split.splitterMoved.connect(self._on_h_splitter_moved)
+        self.h_split.splitterMoved.connect(self._request_autosave)
 
     def _update_stats(self, total: int, tagged: int):
         self.lbl_count.setText(f"{total} foto")
         self.lbl_tagged.setText(f"{tagged} ditag")
+
+    def _request_autosave(self):
+        if not self._restoring_state:
+            self._save_timer.start(2000)
 
     def _restore_window_state(self):
         self._restoring_state = True
@@ -147,21 +160,25 @@ class MainWindow(QMainWindow):
                 pass
 
         gallery_state_raw = self.settings.value("window/gallery_state", "")
+        restored_via_state = False
         if isinstance(gallery_state_raw, str) and gallery_state_raw:
             try:
                 self.content.gallery.restore_state(json.loads(gallery_state_raw))
+                restored_via_state = True
             except (TypeError, json.JSONDecodeError):
                 pass
-        else:
-            last_location = self.settings.value("window/last_location")
-            if isinstance(last_location, str) and last_location:
-                if last_location == DRIVES_MARKER:
-                    self.content.gallery.load_folder(DRIVES_MARKER, _push=False)
-                elif os.path.isdir(last_location):
-                    self.content.gallery.load_folder(last_location, _push=False)
+
+        # Jika tidak berhasil dipulihkan via state, coba via last_location sebagai cadangan
+        if not restored_via_state:
+            last_loc = self.settings.value("window/last_location")
+            if isinstance(last_loc, str) and last_loc:
+                if last_loc == DRIVES_MARKER or os.path.isdir(last_loc):
+                    self.content.gallery.load_folder(last_loc, _push=False)
+
         self._restoring_state = False
 
     def _save_window_state(self):
+        if self._restoring_state: return  # Jangan simpan saat sedang loading
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/h_split_sizes", self.h_split.sizes())
         self.settings.setValue("window/left_panel_width", self._locked_left_width)
