@@ -407,6 +407,7 @@ class ClickableLabel(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.zoom_enabled = False
         self._last_pos = QPoint()
         self._press_pos = QPoint()
         self._is_drag_mode = False
@@ -416,8 +417,9 @@ class ClickableLabel(QLabel):
             self._press_pos = event.pos()
             self._last_pos = event.pos()
             self._is_drag_mode = False
-            # Ubah kursor jadi tangan menggenggam saat klik/drag
-            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            # Hanya ubah kursor jadi menggenggam jika gambar bisa di-zoom/drag
+            if getattr(self, "zoom_enabled", False):
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -432,10 +434,12 @@ class ClickableLabel(QLabel):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            # Hanya trigger zoom jika user TIDAK sedang melakukan drag
             if not self._is_drag_mode:
+                # Klik akan memicu siklus zoom; kursor diatur ulang oleh fungsi load()
                 self.clicked_at.emit(event.pos())
+            elif getattr(self, "zoom_enabled", False):
+                # Jika selesai drag, kembalikan ke tangan terbuka
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         super().mouseReleaseEvent(event)
 
 
@@ -443,8 +447,8 @@ class ClickableLabel(QLabel):
 class PreviewWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(120)
         self._zoom_level = 0  # 0: Fit, 1: 50%, 2: 100%
+        self.setMinimumHeight(120)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -463,11 +467,12 @@ class PreviewWidget(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setStyleSheet("background-color: #0d0d1a; border: none;")
+        self.scroll_area.setObjectName("previewArea")
 
         self.img_label = ClickableLabel()
         self.img_label.clicked_at.connect(self._on_click_zoom)
         self.img_label.dragged.connect(self._on_drag)
+        
         self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.img_label.setStyleSheet(
             "color: #5a5a90; font-size: 11px; border: none;"
@@ -491,35 +496,29 @@ class PreviewWidget(QWidget):
         if not self._current_path or not self.img_label.pixmap():
             return
 
-        old_level = self._zoom_level
         # Hitung koordinat relatif terhadap gambar sebelum zoom berubah
-        # Karena alignment center, kita cari offset gambar di dalam label
         label_w, label_h = self.img_label.width(), self.img_label.height()
         pix_w, pix_h = self.img_label.pixmap().width(), self.img_label.pixmap().height()
         
         offset_x = (label_w - pix_w) // 2
         offset_y = (label_h - pix_h) // 2
         
-        # Titik klik relatif terhadap top-left gambar (0.0 - 1.0)
         rel_x = (pos.x() - offset_x) / pix_w
         rel_y = (pos.y() - offset_y) / pix_h
 
-        # Siklus zoom
+        # Siklus zoom: Fit -> 50% -> 100%
         self._zoom_level = (self._zoom_level + 1) % 3
         self.load(self._current_path)
 
-        # Jika masuk ke mode zoom (50% atau 100%), pusatkan ke titik klik
+        # Pusatkan ke titik klik jika tidak dalam mode Fit
         if self._zoom_level > 0:
-            # Paksa update layout agar scrollbar range terupdate
             self.img_label.adjustSize()
-            
             new_pix_w = self.img_label.pixmap().width()
             new_pix_h = self.img_label.pixmap().height()
             
             target_x = int(rel_x * new_pix_w)
             target_y = int(rel_y * new_pix_h)
             
-            # Hitung posisi scrollbar agar target_x/y ada di tengah viewport
             view_w = self.scroll_area.viewport().width()
             view_h = self.scroll_area.viewport().height()
             
@@ -527,16 +526,12 @@ class PreviewWidget(QWidget):
             self.scroll_area.verticalScrollBar().setValue(target_y - view_h // 2)
 
     def _on_drag(self, delta: QPoint):
-        if self._zoom_level == 0:
-            return # Tidak perlu drag jika mode Fit
-        
+        if self._zoom_level == 0: return
         h_bar = self.scroll_area.horizontalScrollBar()
         v_bar = self.scroll_area.verticalScrollBar()
-        
         h_bar.setValue(h_bar.value() - delta.x())
         v_bar.setValue(v_bar.value() - delta.y())
-        # Kita perlu mengupdate titik awal drag di ClickableLabel secara manual
-        # agar pergerakan terasa smooth (non-cumulative delta)
+        # Update posisi terakhir agar pergerakan halus
         self.img_label._last_pos = self.img_label.mapFromGlobal(QCursor.pos())
 
     def load(self, path: str):
@@ -545,16 +540,22 @@ class PreviewWidget(QWidget):
         try:
             pixmap = QPixmap(path)
             if not pixmap.isNull():
-                if self._zoom_level == 1:
-                    # Zoom 50% dari resolusi asli
-                    scaled = pixmap.scaled(pixmap.size() * 0.5, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                elif self._zoom_level == 2:
-                    # Zoom 100% (Resolusi Asli)
-                    scaled = pixmap
+                w, h = self.scroll_area.width() - 4, self.scroll_area.height() - 4
+
+                if self._zoom_level == 0:
+                    # Mode Fit: Selalu muat di dalam area pratinjau
+                    self.img_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                    scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, 
+                                         Qt.TransformationMode.SmoothTransformation)
+                elif self._zoom_level == 1:
+                    # Mode 50%: Bisa di-drag
+                    self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                    scaled = pixmap.scaled(pixmap.size() * 0.5, Qt.AspectRatioMode.KeepAspectRatio, 
+                                         Qt.TransformationMode.SmoothTransformation)
                 else:
-                    # Zoom Fit (Default)
-                    w, h = self.scroll_area.width() - 4, self.scroll_area.height() - 4
-                    scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    # Mode 100%: Ukuran asli
+                    self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                    scaled = pixmap
                 
                 self.img_label.setPixmap(scaled)
             else:
@@ -565,5 +566,5 @@ class PreviewWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # Hanya update scaling otomatis jika sedang dalam mode "Fit"
-        if self._current_path and self._zoom_level == 0:
+        if self._current_path and getattr(self, '_zoom_level', 0) == 0:
             self.load(self._current_path)
