@@ -243,9 +243,11 @@ class FolderScanWorker(QRunnable):
         if stat is None:
             stat = os.stat(path)
 
+        name = os.path.basename(path)
         meta = {
             'path':      path,
-            'name':      os.path.basename(path),
+            'uid':       f"{name}_{stat.st_size}_{int(stat.st_mtime)}",
+            'name':      name,
             'folder':    str(Path(path).parent),
             'file_size': stat.st_size,
             'modified_at': stat.st_mtime,
@@ -260,6 +262,7 @@ class FolderScanWorker(QRunnable):
 
                 exif_raw = img._getexif() if hasattr(img, '_getexif') else None
                 if exif_raw:
+                    exif_d = {}
                     # Date taken
                     dt_tag = exif_raw.get(36867) or exif_raw.get(306)
                     if dt_tag:
@@ -287,8 +290,17 @@ class FolderScanWorker(QRunnable):
                             meta['gps_lat'] = lat   # already float from _gps_to_decimal
                             meta['gps_lng'] = lng
 
+                    # Additional Metadata from v4 Specs
+                    soft = exif_raw.get(305) # Software
+                    if soft: exif_d['software'] = str(soft).strip()
+                    
+                    lens = exif_raw.get(42036) # LensModel
+                    if lens: exif_d['lens'] = str(lens).strip()
+                    
+                    wb = exif_raw.get(41987) # White Balance
+                    if wb is not None: exif_d['wb'] = "Manual" if wb == 1 else "Auto"
+
                     # Extra EXIF — FIX: always coerce to native Python types
-                    exif_d = {}
                     ap = _to_float(exif_raw.get(33437))
                     if ap is not None:
                         exif_d['aperture'] = f"f/{ap:.1f}"
@@ -304,6 +316,13 @@ class FolderScanWorker(QRunnable):
                     fl = _to_float(exif_raw.get(37386))
                     if fl is not None:
                         exif_d['focal'] = f"{fl:.0f}mm"
+                        
+                    metr = exif_raw.get(37383) # Metering Mode
+                    metr_map = {1:"Average", 2:"Center-weighted", 3:"Spot", 4:"Multi-spot", 5:"Multi-segment"}
+                    if metr in metr_map: exif_d['metering'] = metr_map[metr]
+
+                    if not meta.get('camera'):
+                        meta['camera'] = "Unknown Camera"
 
                     meta['exif_data'] = exif_d
 
