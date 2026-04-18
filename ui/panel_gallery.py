@@ -28,6 +28,32 @@ from core.database import (
 
 init_db()
 
+# Map kategori tag ke warna CSS (sinkron dengan v4)
+TAG_COLORS = {
+    'bg':          '#93c5fd', # tp-b (Blue)
+    'ruang':       '#fdba74', # tp-ru (Orange)
+    'detail_alam': '#5eead4', # tp-da (Teal)
+    'waktu':       '#fdba74', # tp-w (Orange)
+    'konten':      '#93c5fd', # tp-k (Blue)
+    'tipe_foto':   '#c4b5fd', # tp-tf (Purple)
+    'pose':        '#34d399', # tp-p (Green)
+    'mood':        '#f9a8d4', # tp-m (Pink)
+    'outfit':      '#fbbf24', # tp-o (Gold)
+    'expr':        '#c4b5fd', # tp-e (Purple)
+    'wilayah':     '#86efac', # tp-wl (Light Green)
+    'destinasi':   '#67e8f9', # tp-ds (Cyan)
+    'aktivitas':   '#fb923c', # tp-ak (Orange)
+}
+
+EMOJI_MAP = {
+    'bg': {'alam':'🌿','pantai':'🏖️','kota':'🌆','interior':'🏠','studio':'🎨','kendaraan':'🚗','event':'🎤','lainnya':'📍'},
+    'ruang': {'dapur':'🍳','ruang-tamu':'🛋️','kamar-tidur':'🛏️','kamar-mandi':'🚿'},
+    'waktu': {'pagi':'🌅','siang':'☀️','sore':'🌇','malam':'🌙','golden-hour':'🌆'},
+    'konten': {'manusia':'👤','kuliner':'🍽️','hewan':'🐾','arsitektur':'🏛️','dokumen':'📄','tanaman':'🌱','produk':'📦','screenshot':'🖥️','campuran':'🎯'},
+    'pose': {'solo':'🧍','berdua':'👫','trio':'👥','grup':'🫂'},
+    'mood': {'formal':'👗','kasual':'😊','performing':'🎶','candid':'📸','travelling':'✈️'}
+}
+
 
 class GalleryPanel(QWidget):
     photo_selected = Signal(str)
@@ -154,7 +180,7 @@ class GalleryPanel(QWidget):
         return bar
 
     def _build_progress(self):
-        w = QWidget(); w.setFixedHeight(20); w.setStyleSheet("background:#0d0d1a;")
+        w = QWidget(); w.setFixedHeight(20); w.setObjectName("progressContainer")
         L = QHBoxLayout(w); L.setContentsMargins(12,2,12,2); L.setSpacing(8)
         self.prog_bar = QProgressBar(); self.prog_bar.setFixedHeight(3); self.prog_bar.setVisible(False)
         self.prog_lbl = QLabel(""); self.prog_lbl.setObjectName("labelMuted"); self.prog_lbl.setVisible(False)
@@ -201,7 +227,7 @@ class GalleryPanel(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.grid_widget = QWidget(); self.grid_widget.setStyleSheet("background:#07070f;")
+        self.grid_widget = QWidget(); self.grid_widget.setObjectName("galleryGrid")
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setContentsMargins(12,12,12,12); self.grid_layout.setSpacing(8)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -884,7 +910,8 @@ class FolderCard(QFrame):
         L = QVBoxLayout(self); L.setContentsMargins(4,4,4,4); L.setSpacing(3)
         icon = QLabel("📁"); icon.setFixedSize(thumb_size, thumb_size)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet(f"background:#141425;border-radius:6px;font-size:{thumb_size//3}px;")
+        icon.setObjectName("thumbPlaceholder")
+        icon.setStyleSheet(f"font-size:{thumb_size//3}px;")
         iw = QHBoxLayout(); iw.setContentsMargins(0,0,0,0)
         iw.addStretch(); iw.addWidget(icon); iw.addStretch()
         L.addLayout(iw)
@@ -901,16 +928,17 @@ class FolderCard(QFrame):
         except PermissionError: pass
     def set_selected(self, sel: bool):
         self._selected = sel
-        self.setStyleSheet("QFrame#card{background:#1a1a20;border:2px solid #fbbf24;border-radius:10px;}" if sel else "")
+        self.setProperty("selected", sel)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit()
     def mouseDoubleClickEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.double_clicked.emit()
     def enterEvent(self, e):
-        if not self._selected:
-            self.setStyleSheet("QFrame#card{background:#10101e;border:1px solid #fbbf24;border-radius:10px;}")
+        pass
     def leaveEvent(self, e):
-        if not self._selected: self.setStyleSheet("")
+        pass
 
 
 # ── Folder Row ────────────────────────────────────
@@ -919,13 +947,13 @@ class FolderRow(QFrame):
     def __init__(self, folder_path: str):
         super().__init__()
         self._selected = False
+        self.setObjectName("folderRow")
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); self.setFixedHeight(48)
-        self._base = "QFrame{border-bottom:1px solid #141425;}QFrame:hover{background:#10101e;}"
-        self.setStyleSheet(self._base)
         L = QHBoxLayout(self); L.setContentsMargins(8,4,8,4); L.setSpacing(10)
         icon = QLabel("📁"); icon.setFixedSize(36,36)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setStyleSheet("background:#141425;border-radius:4px;font-size:18px;")
+        icon.setObjectName("thumbPlaceholder")
+        icon.setStyleSheet("font-size:18px;")
         L.addWidget(icon)
         nl = QLabel(os.path.basename(folder_path)); nl.setStyleSheet("font-size:12px;")
         L.addWidget(nl); L.addStretch()
@@ -936,7 +964,9 @@ class FolderRow(QFrame):
         except PermissionError: pass
     def set_selected(self, sel: bool):
         self._selected = sel
-        self.setStyleSheet("QFrame{border-bottom:1px solid #141425;background:#1a1a35;border-left:3px solid #fbbf24;}" if sel else self._base)
+        self.setProperty("selected", sel)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit()
     def mouseDoubleClickEvent(self, e):
@@ -954,13 +984,17 @@ class PhotoCard(QFrame):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._selected = False
         L = QVBoxLayout(self); L.setContentsMargins(4,4,4,4); L.setSpacing(3)
+        
+        # Container Thumbnail
         self.thumb_label = QLabel(); self.thumb_label.setFixedSize(thumb_size,thumb_size)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb_label.setStyleSheet("background:#141425;border-radius:6px;")
+        self.thumb_label.setObjectName("thumbPlaceholder")
         tw = QHBoxLayout(); tw.setContentsMargins(0,0,0,0)
         tw.addStretch(); tw.addWidget(self.thumb_label); tw.addStretch()
         L.addLayout(tw)
-        row = QHBoxLayout(); row.setContentsMargins(0,0,0,0); row.setSpacing(2)
+
+        # Baris Info Atas (AI Badge + Fav)
+        row = QHBoxLayout(); row.setContentsMargins(2,0,2,0); row.setSpacing(2)
         if photo.get('ai_tagged'):
             ai = QLabel("AI ✨"); ai.setStyleSheet(
                 "background:rgba(167,139,250,.85);color:#fff;"
@@ -973,11 +1007,41 @@ class PhotoCard(QFrame):
             "QToolButton:hover{color:#fbbf24;}")
         fav.clicked.connect(lambda: self.fav_toggled.emit(photo['path']))
         row.addWidget(fav); L.addLayout(row)
+
+        # Container Tags (Sinkron v4 visual)
+        self.tag_container = QWidget()
+        self.tag_layout = QHBoxLayout(self.tag_container)
+        self.tag_layout.setContentsMargins(0,0,0,0); self.tag_layout.setSpacing(3)
+        self.tag_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        L.addWidget(self.tag_container)
+        # TEMPORARY: Nonaktifkan visual tag agar kembali ke tampilan awal
+        # self._render_tags()
+
         name = photo.get('name','')
         if len(name)>22: name=name[:20]+"…"
         nl = QLabel(name); nl.setObjectName("labelMuted")
         nl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         nl.setFixedHeight(15); nl.setStyleSheet("font-size:10px;"); L.addWidget(nl)
+
+    def _render_tags(self):
+        # Clear existing
+        while self.tag_layout.count():
+            item = self.tag_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        tags = self.photo.get('tags', {})
+        # Tampilkan maksimal 3 tag utama agar tidak berantakan di grid
+        visible_keys = ['bg', 'konten', 'waktu', 'wilayah', 'mood']
+        count = 0
+        for k in visible_keys:
+            val = tags.get(k)
+            if val and count < 3:
+                emoji = EMOJI_MAP.get(k, {}).get(val, '')
+                color = TAG_COLORS.get(k, '#5a5a90')
+                lbl = QLabel(f"{emoji} {val}" if emoji else val)
+                lbl.setStyleSheet(f"background: {color}22; color: {color}; border-radius: 4px; font-size: 8px; font-weight: 700; padding: 1px 4px;")
+                self.tag_layout.addWidget(lbl)
+                count += 1
     def set_thumb(self, path: str):
         pix = QPixmap(path)
         if not pix.isNull():
@@ -987,17 +1051,17 @@ class PhotoCard(QFrame):
                 Qt.TransformationMode.SmoothTransformation))
     def set_selected(self, sel: bool):
         self._selected = sel
-        self.setStyleSheet("QFrame#card{background:#1a1a35;border:2px solid #a78bfa;border-radius:10px;}" if sel else "")
+        self.setProperty("selected", sel)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit()
     def mouseDoubleClickEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.double_clicked.emit()
     def enterEvent(self, e):
         self.hovered.emit()
-        if not self._selected:
-            self.setStyleSheet("QFrame#card{background:#10101e;border:1px solid #60a5fa;border-radius:10px;}")
     def leaveEvent(self, e):
-        if not self._selected: self.setStyleSheet("")
+        pass
 
 
 # ── List Row ──────────────────────────────────────
@@ -1006,13 +1070,12 @@ class ListRow(QFrame):
     def __init__(self, photo: dict):
         super().__init__()
         self._selected = False
+        self.setObjectName("listRow")
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); self.setFixedHeight(56)
-        self._base = "QFrame{border-bottom:1px solid #141425;}QFrame:hover{background:#10101e;}"
-        self.setStyleSheet(self._base)
         L = QHBoxLayout(self); L.setContentsMargins(8,4,8,4); L.setSpacing(10)
         self.thumb = QLabel(); self.thumb.setFixedSize(46,46)
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setStyleSheet("background:#141425;border-radius:4px;"); L.addWidget(self.thumb)
+        self.thumb.setObjectName("thumbPlaceholder"); L.addWidget(self.thumb)
         info = QVBoxLayout(); info.setSpacing(2)
         fav="⭐ " if photo.get('fav') else ""; ai="✨ " if photo.get('ai_tagged') else ""
         raw = photo.get('name','')
@@ -1034,7 +1097,9 @@ class ListRow(QFrame):
                 Qt.TransformationMode.SmoothTransformation))
     def set_selected(self, sel: bool):
         self._selected = sel
-        self.setStyleSheet("QFrame{border-bottom:1px solid #141425;background:#1a1a35;border-left:3px solid #a78bfa;}" if sel else self._base)
+        self.setProperty("selected", sel)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def mousePressEvent(self, e):
         if e.button()==Qt.MouseButton.LeftButton: self.clicked.emit()
     def mouseDoubleClickEvent(self, e):
@@ -1049,6 +1114,7 @@ class LightboxClickableLabel(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.zoom_enabled = False
         self._last_pos = QPoint()
         self._press_pos = QPoint()
         self._is_drag_mode = False
@@ -1058,26 +1124,31 @@ class LightboxClickableLabel(QLabel):
             self._press_pos = event.pos()
             self._last_pos = event.pos()
             self._is_drag_mode = False
-            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            if self.zoom_enabled:
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.MouseButton.LeftButton:
+        if self.zoom_enabled and (event.buttons() & Qt.MouseButton.LeftButton):
             # Jika pergerakan lebih dari 5 pixel, aktifkan mode drag
             if (event.pos() - self._press_pos).manhattanLength() > 5:
                 self._is_drag_mode = True
             
             delta = event.pos() - self._last_pos
             self.dragged.emit(delta)
-            # Update last_pos secara manual untuk kelancaran drag di scroll area
-            self._last_pos = self.mapFromGlobal(QCursor.pos())
+            self._last_pos = event.pos()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-            if not self._is_drag_mode:
-                self.clicked_at.emit(event.pos())
+            if self.zoom_enabled:
+                if not self._is_drag_mode:
+                    self.clicked_at.emit(event.pos())
+                else:
+                    # Kembalikan ke tangan terbuka setelah selesai geser (drag)
+                    self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         super().mouseReleaseEvent(event)
 
 
@@ -1087,6 +1158,7 @@ class Lightbox(QDialog):
         super().__init__(parent)
         self.photos=photos; self.current=index
         self._zoom_level = 0  # 0: Fit, 1: 100%
+        self._zoom_allowed = False
         
         # Pastikan dialog bisa menerima input keyboard dengan baik
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1156,14 +1228,24 @@ class Lightbox(QDialog):
         self.lbl_meta.setText("  ·  ".join(parts))
         pix=QPixmap(p['path'])
         if not pix.isNull():
-            if self._zoom_level == 1:
-                # Mode 100%
+            w=self.scroll.viewport().width(); h=self.scroll.viewport().height()
+            
+            # Zoom diaktifkan hanya jika resolusi gambar melebihi resolusi monitor
+            self._zoom_allowed = pix.width() > w or pix.height() > h
+            self.img.zoom_enabled = self._zoom_allowed
+
+            if not self._zoom_allowed:
+                self._zoom_level = 0
+                self.img.setCursor(Qt.CursorShape.ArrowCursor)
                 scaled = pix
             else:
-                # Mode Fit
-                w=self.scroll.viewport().width(); h=self.scroll.viewport().height()
-                scaled = pix.scaled(w,h,Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
+                if self._zoom_level == 0:
+                    self.img.setCursor(Qt.CursorShape.PointingHandCursor)
+                    scaled = pix.scaled(w,h,Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+                else:
+                    self.img.setCursor(Qt.CursorShape.OpenHandCursor)
+                    scaled = pix
             
             self.img.setPixmap(scaled)
         else:
@@ -1314,9 +1396,9 @@ class DriveCard(QFrame):
 
     def set_selected(self, sel: bool):
         self._selected = sel
-        self.setStyleSheet(
-            "QFrame#card{background:#1a1a35;border:2px solid #60a5fa;border-radius:10px;}"
-            if sel else "")
+        self.setProperty("selected", sel)
+        self.style().unpolish(self)
+        self.style().polish(self)
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
@@ -1324,10 +1406,6 @@ class DriveCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit()
     def enterEvent(self, event):
-        if not getattr(self, "_selected", False):
-            self.setStyleSheet(
-                "QFrame#card{background:#10101e;border:1px solid #60a5fa;"
-                "border-radius:10px;}")
+        pass
     def leaveEvent(self, event):
-        if not getattr(self, "_selected", False):
-            self.setStyleSheet("")
+        pass
