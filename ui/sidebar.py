@@ -6,7 +6,7 @@ from PySide6.QtGui import QCursor
 class Sidebar(QWidget):
     """Vertical icon navigation bar on the far left."""
 
-    nav_changed = Signal(str)  # emits section name when nav button clicked
+    nav_changed = Signal(str)  # emits section name when nav button clicked 
 
     NAV_ITEMS = [
         ("🖼️",  "gallery",    "Gallery"),
