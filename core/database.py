@@ -40,6 +40,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS photos (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             path        TEXT    UNIQUE NOT NULL,
+            uid         TEXT    UNIQUE,
             name        TEXT    NOT NULL,
             folder      TEXT    NOT NULL,
             file_size   INTEGER DEFAULT 0,
@@ -57,6 +58,7 @@ def init_db():
             note        TEXT    DEFAULT '',
             tags        TEXT    DEFAULT '{}',
             face_names  TEXT    DEFAULT '[]',
+            face_recognized INTEGER DEFAULT 0,
             exif_data   TEXT    DEFAULT '{}'
         );
 
@@ -84,6 +86,10 @@ def init_db():
     cols = {row["name"] for row in cur.execute("PRAGMA table_info(photos)").fetchall()}
     if "modified_at" not in cols:
         cur.execute("ALTER TABLE photos ADD COLUMN modified_at REAL DEFAULT 0")
+    if "uid" not in cols:
+        cur.execute("ALTER TABLE photos ADD COLUMN uid TEXT")
+    if "face_recognized" not in cols:
+        cur.execute("ALTER TABLE photos ADD COLUMN face_recognized INTEGER DEFAULT 0")
 
     conn.commit()
     conn.close()
@@ -97,14 +103,15 @@ def upsert_photo(photo: dict) -> int:
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO photos
-                (path, name, folder, file_size, modified_at, img_w, img_h,
+                (path, uid, name, folder, file_size, modified_at, img_w, img_h,
                  date_taken, camera, gps_lat, gps_lng,
-                 added_at, tagged, ai_tagged, fav, note, tags, face_names, exif_data)
+                 added_at, tagged, ai_tagged, fav, note, tags, face_names, face_recognized, exif_data)
             VALUES
-                (:path, :name, :folder, :file_size, :modified_at, :img_w, :img_h,
+                (:path, :uid, :name, :folder, :file_size, :modified_at, :img_w, :img_h,
                  :date_taken, :camera, :gps_lat, :gps_lng,
-                 :added_at, :tagged, :ai_tagged, :fav, :note, :tags, :face_names, :exif_data)
+                 :added_at, :tagged, :ai_tagged, :fav, :note, :tags, :face_names, :face_recognized, :exif_data)
             ON CONFLICT(path) DO UPDATE SET
+                uid        = excluded.uid,
                 name       = excluded.name,
                 file_size  = excluded.file_size,
                 modified_at = excluded.modified_at,
@@ -120,9 +127,11 @@ def upsert_photo(photo: dict) -> int:
                 note       = excluded.note,
                 tags       = excluded.tags,
                 face_names = excluded.face_names,
+                face_recognized = excluded.face_recognized,
                 exif_data  = excluded.exif_data
         """, {
             'path':       photo['path'],
+            'uid':        photo.get('uid'),
             'name':       photo.get('name', os.path.basename(photo['path'])),
             'folder':     str(Path(photo['path']).parent),
             'file_size':  photo.get('file_size', 0),
@@ -140,11 +149,33 @@ def upsert_photo(photo: dict) -> int:
             'note':       photo.get('note', ''),
             'tags':       json.dumps(photo.get('tags', {})),
             'face_names': json.dumps(photo.get('face_names', [])),
+            'face_recognized': int(photo.get('face_recognized', False)),
             'exif_data':  json.dumps(photo.get('exif_data', {})),
         })
         photo_id = cur.lastrowid
         conn.commit()
         return photo_id
+
+def normalize_tags(res: dict) -> dict:
+    """
+    Python implementation of web version's applyResFields().
+    Ensures that empty strings or 'null' strings are stored as None.
+    """
+    fields = [
+        'bg', 'ruang', 'detail_alam', 'waktu', 'konten', 'tipe_foto', 
+        'pose', 'mood', 'outfit', 'expr', 'kacamata', 'rambut', 
+        'postur', 'aksesori', 'usia', 'wilayah', 'destinasi', 
+        'aktivitas', 'doc_type', 'bahasa_teks', 'relasi', 'sudut'
+    ]
+    
+    normalized = {}
+    for f in fields:
+        val = res.get(f)
+        if val in (None, '', 'null', 'None'):
+            normalized[f] = None
+        else:
+            normalized[f] = val
+    return normalized
 
 
 def get_photos_in_folder(folder: str) -> list[dict]:
@@ -256,4 +287,5 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d['ai_tagged']  = bool(d.get('ai_tagged'))
     d['fav']        = bool(d.get('fav'))
     d['modified_at'] = float(d.get('modified_at') or 0)
+    d['face_recognized'] = bool(d.get('face_recognized', 0))
     return d
