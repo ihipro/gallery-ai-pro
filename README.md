@@ -22,17 +22,20 @@ Persiapan & Instalasi
 1. Clone repositori:
 
    ==bash==
+   
    git clone https://github.com/username/GalleryAIPro.git
    cd GalleryAIPro
 
-2. Instal dependensi:
+3. Instal dependensi:
 
    ==bash==
+   
    pip install -r requirements.txt
 
-3. Jalankan aplikasi:
+5. Jalankan aplikasi:
 
    ==bash==
+   
    python main.py
    
 
