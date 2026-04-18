@@ -4,18 +4,18 @@ Top-level window: sidebar + left panel + content area, all wired together.
 """
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QSplitter,
-    QStatusBar, QLabel, QProgressBar
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
+    QStatusBar, QLabel, QProgressBar, QFormLayout, QComboBox, QGroupBox
 )
 import json
 import os
 
-from PySide6.QtCore import Qt, QThreadPool, QSettings, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QSettings, QTimer, Signal
 
-from ui.sidebar      import Sidebar
-from ui.panel_left   import LeftPanel, DRIVES_MARKER
-from ui.panel_gallery import GalleryPanel
-from ui.theme        import DARK_THEME
+from ui.sidebar       import Sidebar
+from ui.panel_left    import LeftPanel, DRIVES_MARKER
+from ui.panel_gallery  import GalleryPanel
+from ui.theme         import get_stylesheet
 
 
 class MainWindow(QMainWindow):
@@ -27,7 +27,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Gallery AI Pro")
         self.setMinimumSize(1100, 680)
         self.resize(1400, 860)
-        self.setStyleSheet(DARK_THEME)
+
+        # Default ke tema System (Mengikuti Windows Explorer)
+        self.current_theme = self.settings.value("window/theme", "System")
+        self.setStyleSheet(get_stylesheet(self.current_theme))
 
         # Timer untuk debounced autosave (2 detik setelah perubahan terakhir)
         self._save_timer = QTimer(self)
@@ -114,6 +117,14 @@ class MainWindow(QMainWindow):
         self.h_split.splitterMoved.connect(self._on_h_splitter_moved)
         self.h_split.splitterMoved.connect(self._request_autosave)
 
+    def change_theme(self, theme_name: str):
+        """Update application theme globally."""
+        self.current_theme = theme_name
+        self.setStyleSheet(get_stylesheet(theme_name))
+        self.settings.setValue("window/theme", theme_name)
+        # Re-polish sidebar buttons if needed
+        self.sidebar._set_active(self.sidebar._active)
+
     def _update_stats(self, total: int, tagged: int):
         self.lbl_count.setText(f"{total} foto")
         self.lbl_tagged.setText(f"{tagged} ditag")
@@ -174,6 +185,9 @@ class MainWindow(QMainWindow):
             if isinstance(last_loc, str) and last_loc:
                 if last_loc == DRIVES_MARKER or os.path.isdir(last_loc):
                     self.content.gallery.load_folder(last_loc, _push=False)
+
+        # Sidebar & Content wiring
+        self.content.settings_panel.theme_changed.connect(self.change_theme)
 
         self._restoring_state = False
 
@@ -246,9 +260,13 @@ class ContentStack(QWidget):
         self.gallery = GalleryPanel()
         layout.addWidget(self.gallery)
 
+        self.settings_panel = SettingsPanel()
+        layout.addWidget(self.settings_panel)
+        self.settings_panel.setVisible(False)
+
         # Placeholder panels for sections not yet built
         self._ph: dict[str, QWidget] = {}
-        for name in ["timeline","search","face","map","duplicates","stats","settings"]:
+        for name in ["timeline","search","face","map","duplicates","stats"]:
             w = self._placeholder(name)
             self._ph[name] = w
             layout.addWidget(w)
@@ -258,7 +276,6 @@ class ContentStack(QWidget):
 
     def _placeholder(self, name: str) -> QWidget:
         w = QWidget()
-        from PySide6.QtWidgets import QVBoxLayout
         L = QVBoxLayout(w)
         L.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_map = {
@@ -276,12 +293,16 @@ class ContentStack(QWidget):
         # Hide current
         if self._current == "gallery":
             self.gallery.setVisible(False)
+        elif self._current == "settings":
+            self.settings_panel.setVisible(False)
         elif self._current in self._ph:
             self._ph[self._current].setVisible(False)
 
         # Show new
         if name == "gallery":
             self.gallery.setVisible(True)
+        elif name == "settings":
+            self.settings_panel.setVisible(True)
         elif name in self._ph:
             self._ph[name].setVisible(True)
         else:
@@ -290,3 +311,38 @@ class ContentStack(QWidget):
             name = "gallery"
 
         self._current = name
+
+
+class SettingsPanel(QWidget):
+    """Real settings panel to manage API Keys and Themes."""
+    theme_changed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        
+        L = QVBoxLayout(self)
+        L.setContentsMargins(40, 40, 40, 40)
+        L.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        title = QLabel("⚙️  Pengaturan")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; margin-bottom: 20px;")
+        L.addWidget(title)
+
+        # Appearance Group
+        group = QGroupBox("Tampilan")
+        FL = QFormLayout(group)
+        FL.setContentsMargins(20, 20, 20, 20)
+        FL.setSpacing(15)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["System", "Windows Light", "Windows Dark", "Slate Classic", "Astro Dark"])
+        
+        settings = QSettings("GalleryAIPro", "Gallery AI Pro")
+        saved_theme = settings.value("window/theme", "Astro Dark")
+        self.theme_combo.setCurrentText(saved_theme)
+        
+        self.theme_combo.currentTextChanged.connect(self.theme_changed.emit)
+        
+        FL.addRow("Tema Aplikasi:", self.theme_combo)
+        L.addWidget(group)
+        L.addStretch()
