@@ -1,4 +1,5 @@
 Gallery AI Pro
+
 Gallery AI Pro adalah aplikasi manajemen foto desktop berbasis Python dan PySide6 yang dirancang untuk mengelola, mencari, dan mengorganisir koleksi foto besar secara cerdas. Aplikasi ini menggabungkan performa aplikasi native dengan kapabilitas AI modern (Gemini, OpenAI, dan Anthropic) untuk fitur auto-tagging dan pengenalan wajah (model lokal).
 
 Fitur Utama
