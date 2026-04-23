@@ -178,7 +178,7 @@ class FolderScanWorker(QRunnable):
         Subfolders are shown as navigable cards; user double-clicks into them.
         finished() always emits so the UI progress bar always clears.
         """
-        from core.database import get_photos_in_folder, upsert_photo
+        from core.database import get_photos_in_folder, upsert_photos_batch
         done = 0
         try:
             all_entries = []
@@ -197,6 +197,7 @@ class FolderScanWorker(QRunnable):
                 for photo in get_photos_in_folder(self.folder)
             }
 
+            batch_to_upsert = []
             for entry in all_entries:
                 if self._cancelled:
                     break
@@ -210,7 +211,12 @@ class FolderScanWorker(QRunnable):
                         meta = existing
                     else:
                         meta = self._read_meta(path, stat)
-                        upsert_photo(meta)
+                        batch_to_upsert.append(meta)
+
+                    if len(batch_to_upsert) >= 50:
+                        upsert_photos_batch(batch_to_upsert)
+                        batch_to_upsert = []
+
                     # Thumbnail generation is intentionally NOT called here.
                     # ThumbLoader handles it async when cards are displayed.
                     done += 1
@@ -226,6 +232,9 @@ class FolderScanWorker(QRunnable):
                         self.signals.progress.emit(done, total)
                     except RuntimeError:
                         return
+
+            if batch_to_upsert:
+                upsert_photos_batch(batch_to_upsert)
 
         except Exception as e:
             print(f"[Scanner] Fatal error: {e}")

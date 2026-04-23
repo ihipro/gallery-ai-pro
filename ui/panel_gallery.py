@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QLabel, QScrollArea,
     QGridLayout, QFrame, QSizePolicy,
     QToolButton, QDialog, QApplication, QProgressBar,
-    QButtonGroup
+    QButtonGroup, QListView, QStyledItemDelegate, QStyle
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint
-from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
-import os
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QAbstractListModel, QModelIndex, QSize, QRect
+from PySide6.QtGui import QPixmap, QCursor, QKeyEvent, QPainter, QColor, QFont, QPen
+from PySide6.QtWebChannel import QWebChannel
+import os, math
 
 from core.thumbnailer import ThumbLoader, FolderScanWorker, ScannerSignals
 from core.database import (
@@ -54,6 +55,171 @@ EMOJI_MAP = {
     'mood': {'formal':'👗','kasual':'😊','performing':'🎶','candid':'📸','travelling':'✈️'}
 }
 
+class GalleryModel(QAbstractListModel):
+    """Model data tunggal untuk menyimpan ribuan item (folder/foto)."""
+    PathRole = Qt.ItemDataRole.UserRole + 1
+    TypeRole = Qt.ItemDataRole.UserRole + 2  # 'f' folder, 'p' photo, 's' separator
+    DataRole = Qt.ItemDataRole.UserRole + 3
+    ThumbRole = Qt.ItemDataRole.UserRole + 4
+
+    def __init__(self):
+        super().__init__()
+        self.items = [] # list of (type, data_dict_or_path)
+        self.thumb_cache = {}
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self.items)
+
+    def flags(self, index):
+        if not index.isValid(): return Qt.ItemFlag.NoItemFlags
+        item_type = self.items[index.row()][0]
+        if item_type == 's':
+            return Qt.ItemFlag.ItemIsEnabled # Aktif tapi tidak bisa dipilih (Selectable)
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid(): return None
+        row = index.row()
+        item_type, item_data = self.items[row]
+
+        if role == self.TypeRole: return item_type
+        if role == self.PathRole:
+            return item_data if not isinstance(item_data, dict) else item_data.get('path')
+        if role == self.DataRole: return item_data
+        if role == self.ThumbRole:
+            if item_type == 's': return None
+            path = item_data if not isinstance(item_data, dict) else item_data.get('path')
+            return self.thumb_cache.get(path)
+        return None
+
+    def update_thumb(self, path, thumb_path):
+        for i, (it, idat) in enumerate(self.items):
+            if it == 's': continue
+            # Gunakan cara aman untuk mengambil path untuk perbandingan
+            ipath = idat if not isinstance(idat, dict) else idat.get('path')
+            if ipath == path:
+                self.thumb_cache[path] = thumb_path
+                idx = self.index(i)
+                self.dataChanged.emit(idx, idx, [self.ThumbRole])
+                break
+
+    def set_items(self, new_items):
+        self.beginResetModel()
+        self.items = new_items
+        self.endResetModel()
+
+class GalleryDelegate(QStyledItemDelegate):
+    """Melukis item secara manual (Virtual Rendering)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.view_mode = "grid"
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        item_type = index.data(GalleryModel.TypeRole)
+        path = index.data(GalleryModel.PathRole)
+        rect = option.rect
+        
+        # Ambil warna dari palette untuk mendukung tema dinamis secara akurat
+        palette = option.palette
+        accent_color = palette.highlight().color()
+        text_color = palette.windowText().color()
+        muted_color = palette.placeholderText().color()
+        
+        # 1. Background (Highlight/Hover) - Hanya untuk folder dan foto
+        if item_type != 's':
+            is_sel = option.state & QStyle.StateFlag.State_Selected
+            is_hover = option.state & QStyle.StateFlag.State_MouseOver
+            
+            if is_sel:
+                bg_sel = QColor(accent_color)
+                bg_sel.setAlpha(45) # Transparansi untuk background seleksi
+                painter.fillRect(rect, bg_sel)
+                painter.setPen(QPen(accent_color, 2))
+                painter.drawRect(rect.adjusted(1,1,-1,-1))
+            elif is_hover:
+                bg_hover = QColor(text_color)
+                bg_hover.setAlpha(15) # Efek hover halus menggunakan warna teks
+                painter.fillRect(rect, bg_hover)
+
+        # 2. Draw Content based on Type
+        if item_type == 's': # Separator
+            painter.setPen(muted_color)
+            painter.setFont(QFont("DM Sans", 9, QFont.Weight.Bold))
+            painter.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, str(path))
+        
+        elif item_type in ('f', 'd', 'p'):
+            # Draw Thumbnail
+            thumb_path = index.data(GalleryModel.ThumbRole)
+            thumb_rect = rect.adjusted(10, 10, -10, -40) if self.view_mode == "grid" else QRect(rect.x()+5, rect.y()+5, 40, 40)
+            
+            if thumb_path:
+                pix = QPixmap(thumb_path)
+                if not pix.isNull():
+                    # Skala gambar dengan mempertahankan rasio aspek asli agar tidak terlihat gepeng/tertarik
+                    scaled_pix = pix.scaled(thumb_rect.size(), 
+                                          Qt.AspectRatioMode.KeepAspectRatio, 
+                                          Qt.TransformationMode.SmoothTransformation)
+                    # Hitung koordinat agar gambar digambar tepat di tengah area thumb_rect
+                    tx = thumb_rect.x() + (thumb_rect.width() - scaled_pix.width()) // 2
+                    ty = thumb_rect.y() + (thumb_rect.height() - scaled_pix.height()) // 2
+                    painter.drawPixmap(tx, ty, scaled_pix)
+            else:
+                # Placeholder
+                # Background placeholder disesuaikan dengan kegelapan tema
+                base_color = palette.base().color()
+                placeholder_bg = base_color.lighter(120) if base_color.lightness() < 128 else base_color.darker(110)
+                painter.fillRect(thumb_rect, placeholder_bg)
+                
+                painter.setPen(muted_color)
+                icon = "📁" if item_type in ('f', 'd') else "🖼️"
+                # Gunakan font yang lebih besar sesuai mode tampilan
+                icon_font_size = 42 if self.view_mode == "grid" else 20
+                painter.setFont(QFont("DM Sans", icon_font_size))
+                painter.drawText(thumb_rect, Qt.AlignmentFlag.AlignCenter, icon)
+
+            # Draw Text
+            name = os.path.basename(path) if item_type != 'd' else path
+            text_rect = rect.adjusted(5, rect.height()-30, -5, -5) if self.view_mode == "grid" else rect.adjusted(55, 0, -10, 0)
+            if is_sel:
+                # Jika tema terang (lightness > 128), gunakan warna teks gelap agar kontras dengan highlight transparan
+                painter.setPen(text_color if palette.base().color().lightness() > 128 else palette.highlightedText().color())
+            else:
+                painter.setPen(muted_color)
+            painter.setFont(QFont("DM Sans", 8))
+            elided_name = painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, text_rect.width())
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter if self.view_mode == "grid" else Qt.AlignmentFlag.AlignVCenter, elided_name)
+            
+            # Draw AI/Fav Icons for photos
+            if item_type == 'p':
+                data = index.data(GalleryModel.DataRole)
+                if data.get('fav'):
+                    painter.drawText(rect.adjusted(0, 5, -5, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight, "⭐")
+                if data.get('ai_tagged'):
+                    painter.setBrush(accent_color)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRoundedRect(QRect(rect.x()+5, rect.y()+5, 30, 14), 4, 4)
+                    painter.setPen(Qt.PenStyle.SolidLine)
+                    painter.setPen(QColor("white"))
+                    painter.setFont(QFont("DM Sans", 7, QFont.Weight.Bold))
+                    painter.drawText(QRect(rect.x()+5, rect.y()+5, 30, 14), Qt.AlignmentFlag.AlignCenter, "AI")
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        item_type = index.data(GalleryModel.TypeRole)
+        if item_type == 's':
+            # Gunakan lebar widget (QListView) agar separator menjadi baris penuh
+            width = option.widget.width() if option.widget else 500
+            return QSize(width - 40, 38)
+        if self.view_mode == "grid":
+            return QSize(170, 200)
+        elif self.view_mode == "compact":
+            return QSize(100, 120)
+        return QSize(option.rect.width(), 50) # List mode
+
 
 class GalleryPanel(QWidget):
     photo_selected = Signal(str)
@@ -73,14 +239,12 @@ class GalleryPanel(QWidget):
         self.active_filter  = "all"
         self.hover_enabled  = True
         self.current_folder = None
-        self._cards: dict[str, 'PhotoCard'] = {}
-        self._list_rows: dict[str, 'ListRow'] = {}
-        self._folder_widgets: dict[str, object] = {}  # FolderCard/FolderRow/DriveCard
         self._all_items: list[tuple] = []
         self._item_pos: dict[str, tuple] = {}   # path → (row, col) visual grid position
         self._sel_path: str | None = None
         self._nav_history: list[str] = []
         self._is_drives_view: bool = False   # True when showing drive list
+        self._is_quick_access_view: bool = False
         self._scanner       = None
         self._scan_signals  = None
         self._scan_token    = 0
@@ -88,8 +252,13 @@ class GalleryPanel(QWidget):
         self._pending_restore_selection: str | None = None
         self._pending_restore_scroll: tuple[int, int] | None = None
 
+        # Model-View Setup
+        self.model = GalleryModel()
+        self.delegate = GalleryDelegate(self)
+
         self.thumb_loader = ThumbLoader(self)
-        self.thumb_loader.thumb_ready.connect(self._on_thumb_ready)
+        # Loader sekarang update model, bukan widget card
+        self.thumb_loader.thumb_ready.connect(self.model.update_thumb)
         self._progress_failsafe = QTimer(self)
         self._progress_failsafe.setSingleShot(True)
         self._progress_failsafe.timeout.connect(self._force_hide_progress)
@@ -155,6 +324,7 @@ class GalleryPanel(QWidget):
             "🔤 Nama A–Z","🔤 Nama Z–A",
             "📅 Tanggal (terbaru)","📅 Tanggal (lama)",
             "📦 Ukuran (terbesar)","📦 Ukuran (terkecil)",
+            "🔤 Ekstensi (A–Z)","🔤 Ekstensi (Z–A)",
         ])
         self.sort_combo.currentIndexChanged.connect(self._apply_filter)
         self.sort_combo.currentIndexChanged.connect(self.state_changed)
@@ -221,24 +391,76 @@ class GalleryPanel(QWidget):
         return bar
 
     def _build_scroll(self):
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.grid_widget = QWidget(); self.grid_widget.setObjectName("galleryGrid")
-        self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setContentsMargins(12,12,12,12); self.grid_layout.setSpacing(8)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.scroll.setWidget(self.grid_widget)
-        # Simpan state saat scroll manual dilepas
-        self.scroll.verticalScrollBar().sliderReleased.connect(self.state_changed)
-        return self.scroll
+        self.view = QListView()
+        self.view.setObjectName("galleryGrid")
+        self.view.setFrameShape(QFrame.Shape.NoFrame)
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(self.delegate)
+        self.view.setViewMode(QListView.ViewMode.IconMode)
+        self.view.setResizeMode(QListView.ResizeMode.Adjust)
+        self.view.setWrapping(True)
+        self.view.setWordWrap(True)
+        self.view.setSpacing(10)
+        self.view.setUniformItemSizes(False) # Diperlukan agar sizeHint separator bekerja
+        self.view.setMouseTracking(True) # Aktifkan pendeteksian mouse tanpa klik
+        self.view.clicked.connect(self._on_view_clicked)
+        self.view.entered.connect(self._on_view_entered)
+        self.view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.view.doubleClicked.connect(self._on_view_double_clicked)
+        
+        return self.view
+
+    def _on_view_clicked(self, index: QModelIndex):
+        if not index.isValid(): return
+        path = index.data(GalleryModel.PathRole)
+        item_type = index.data(GalleryModel.TypeRole)
+        
+        self._sel_path = path
+        if item_type == 'p':
+            self.photo_selected.emit(path)
+        self.state_changed.emit()
+
+    def _on_current_changed(self, current: QModelIndex, previous: QModelIndex):
+        """Memperbarui pratinjau foto saat navigasi menggunakan keyboard."""
+        if current.isValid():
+            self._on_view_clicked(current)
+
+    def _on_view_entered(self, index: QModelIndex):
+        """Dipanggil saat mouse melewati (hover) sebuah item."""
+        if not index.isValid() or not self.hover_enabled:
+            return
+            
+        item_type = index.data(GalleryModel.TypeRole)
+        if item_type == 'p':
+            path = index.data(GalleryModel.PathRole)
+            self.photo_selected.emit(path)
+
+    def _on_view_double_clicked(self, index: QModelIndex):
+        if not index.isValid(): return
+        item_type = index.data(GalleryModel.TypeRole)
+        path = index.data(GalleryModel.PathRole)
+        
+        if item_type in ('f', 'd'):
+            self.load_folder(path)
+        elif item_type == 'p':
+            # Cari index foto di dalam self.filtered untuk lightbox
+            idx = -1
+            for i, p in enumerate(self.filtered):
+                if p['path'] == path:
+                    idx = i; break
+            if idx != -1:
+                self._card_click(self.filtered[idx], idx)
 
     # ── Load ──────────────────────────────────────
     def load_folder(self, folder: str, _push: bool = True):
-        from ui.panel_left import DRIVES_MARKER
+        from ui.panel_left import DRIVES_MARKER, QUICK_ACCESS_MARKER
+
+        # Guard: Hindari pemuatan ulang jika sudah berada di tampilan drive
+        # Ini mencegah race condition saat restorasi startup (tiga kali panggil)
+        if folder == DRIVES_MARKER and self._is_drives_view:
+            return
+        if folder == QUICK_ACCESS_MARKER and getattr(self, "_is_quick_access_view", False):
+            return
 
         # Special case: show available drives as cards
         if folder == DRIVES_MARKER:
@@ -248,6 +470,16 @@ class GalleryPanel(QWidget):
             self._sel_path = None
             self._show_drives_view()
             self.location_changed.emit(DRIVES_MARKER)
+            return
+
+        # Special case: Akses Cepat
+        if folder == QUICK_ACCESS_MARKER:
+            if _push and self.current_folder:
+                self._nav_history.append(self.current_folder)
+            self.btn_back.setEnabled(bool(self._nav_history))
+            self._sel_path = None
+            self._show_quick_access_view()
+            self.location_changed.emit(QUICK_ACCESS_MARKER)
             return
 
         # Push current folder to history before navigating
@@ -262,9 +494,9 @@ class GalleryPanel(QWidget):
 
         self.current_folder = folder
         self._is_drives_view = False   # ← leaving drives view
+        self._is_quick_access_view = False
 
-        # Always reset so old photos never bleed into new folder
-        self.photos = []; self._cards.clear(); self._photo_paths_cache = set()
+        self.photos = []; self._photo_paths_cache = set()
 
         # Subfolders for navigation
         self._subfolders = self._get_subfolders(folder)
@@ -286,58 +518,23 @@ class GalleryPanel(QWidget):
             self._scanner.cancel(); self._scanner = None
         self._progress_failsafe.stop()
 
-        self.photos = []; self._cards.clear()
-        self.current_folder = None
+        self._is_quick_access_view = False
         self._is_drives_view = True
+        self.photos = []
+        self.current_folder = None
+        self._render_grid()
 
-        # Clear grid
-        self._folder_widgets.clear()
-        self._all_items.clear()
-        self._item_pos.clear()
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+    def _show_quick_access_view(self):
+        """Show quick access folders as cards."""
+        if self._scanner:
+            self._scanner.cancel(); self._scanner = None
+        self._progress_failsafe.stop()
 
-        drives = [
-            f"{l}:\\" for l in string.ascii_uppercase
-            if os.path.exists(f"{l}:\\")
-        ]
-
-        self.prog_bar.setVisible(False)
-        self.prog_lbl.setVisible(False)
-        self.lbl_count.setText(f"{len(drives)} drive")
-
-        for d in drives:
-            self._all_items.append(('f', d))
-
-        if self.view_mode == 'list':
-            # Show drives as rows
-            self.grid_layout.addWidget(self._sep("💾  Drive"), 0, 0)
-            for i, drive in enumerate(drives):
-                card = DriveCard(drive, list_mode=True)
-                self._folder_widgets[drive] = card
-                self._item_pos[drive] = (i + 1, 0)
-                card.clicked.connect(lambda d=drive, w=card: self._select(d, w))
-                card.double_clicked.connect(lambda d=drive: self.load_folder(d))
-                self.grid_layout.addWidget(card, i + 1, 0)
-        else:
-            # Grid / compact — card minimum width matches FolderCard
-            min_w = 80 if self.view_mode == 'compact' else 150
-            vw = self.scroll.viewport().width() or 800
-            cols = max(1, (vw - 36) // (min_w + 8))
-            for i, drive in enumerate(drives):
-                card = DriveCard(drive, compact=(self.view_mode == "compact"))
-                self._folder_widgets[drive] = card
-                r, c2 = divmod(i, cols)
-                self._item_pos[drive] = (r, c2)
-                card.clicked.connect(lambda d=drive, w=card: self._select(d, w))
-                card.double_clicked.connect(lambda d=drive: self.load_folder(d))
-                self.grid_layout.addWidget(card, r, c2)
-            for col in range(cols):
-                self.grid_layout.setColumnStretch(col, 1)
-                self.grid_layout.setColumnMinimumWidth(col, min_w)
-        self._restore_selection_state()
-        self._restore_pending_scroll(finalize=True)
+        self._is_drives_view = False
+        self._is_quick_access_view = True
+        self.photos = []
+        self.current_folder = None
+        self._render_grid()
 
     def _get_subfolders(self, folder: str) -> list[str]:
         try:
@@ -468,18 +665,28 @@ class GalleryPanel(QWidget):
 
     def _set_view(self, mode: str):
         self.view_mode = mode
+        self.delegate.view_mode = mode
         for m, btn in self._view_btns.items(): btn.setChecked(m==mode)
-        # If currently showing drives, re-render drives (not folder grid)
-        if self._is_drives_view:
-            self._show_drives_view()
-        else:
-            self._render_grid()
+        self.view.doItemsLayout()
+        self._render_grid()
         self.state_changed.emit()
 
     def _apply_filter(self):
+        if self._is_drives_view or getattr(self, "_is_quick_access_view", False):
+            return
+            
         q = self.search.text().lower()
         f = self.active_filter
         si = self.sort_combo.currentIndex()
+
+        # 1. Sort Subfolders (Gunakan Nama atau Tanggal Modifikasi)
+        def fskey(fp):
+            if si in (4, 5): # Tanggal Modifikasi
+                try: return os.path.getmtime(fp)
+                except: return 0
+            return os.path.basename(fp).lower()
+        self._subfolders.sort(key=fskey, reverse=si in (3, 4, 9))
+
         result = [p for p in self.photos if
             (not q or q in p.get('name','').lower()) and
             (f=="all" or (f=="untagged" and not p.get('tagged')) or
@@ -488,8 +695,12 @@ class GalleryPanel(QWidget):
             if si in (0,1): return p.get('added_at','')
             if si in (2,3): return p.get('name','').lower()
             if si in (4,5): return p.get('date_taken','') or ''
+            if si in (8,9): 
+                ext = os.path.splitext(p.get('name', ''))[1].lower()
+                name = p.get('name', '').lower()
+                return (ext, name)
             return p.get('file_size',0)
-        result.sort(key=skey, reverse=si in (0,3,4,6))
+        result.sort(key=skey, reverse=si in (0,3,4,6,9))
         self.filtered = result
         parts = []
         if self._subfolders: parts.append(f"{len(self._subfolders)} folder")
@@ -499,111 +710,36 @@ class GalleryPanel(QWidget):
 
     # ── Render ────────────────────────────────────
     def _render_grid(self):
-        self._cards.clear()
-        self._list_rows.clear()
-        self._folder_widgets.clear()
-        self._all_items.clear()
-        self._item_pos.clear()
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
-        has_f = bool(self._subfolders)
-        has_p = bool(self.filtered)
-
-        if not has_f and not has_p:
-            lbl = QLabel("📂  Belum ada foto\n\nBuka folder atau tambah foto untuk memulai")
-            lbl.setObjectName("labelMuted"); lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.grid_layout.addWidget(lbl, 0, 0); return
-
-        # Build flat list for keyboard navigation
-        for fp in self._subfolders: self._all_items.append(('f', fp))
-        for ph in self.filtered:    self._all_items.append(('p', ph))
-
-        # ── List mode ──────────────────────────────
-        if self.view_mode == "list":
-            row = 0
-            if has_f:
-                self.grid_layout.addWidget(self._sep("📁  Subfolder"), row, 0); row+=1
-                for fp in self._subfolders:
-                    w = FolderRow(fp)
-                    self._folder_widgets[fp] = w
-                    self._item_pos[fp] = (row, 0)
-                    w.clicked.connect(lambda p=fp, ww=w: self._select(p, ww))
-                    w.double_clicked.connect(lambda p=fp: self.load_folder(p))
-                    self.grid_layout.addWidget(w, row, 0); row+=1
-            if has_p:
-                if has_f:
-                    self.grid_layout.addWidget(self._sep("🖼️  Foto"), row, 0); row+=1
-                for i, photo in enumerate(self.filtered):
-                    w = ListRow(photo)
-                    self._item_pos[photo['path']] = (row, 0)
-                    w.clicked.connect(lambda p=photo, ww=w: self._select(p['path'], ww))
-                    w.double_clicked.connect(lambda p=photo, idx=i: self._card_click(p, idx))
-                    w.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']) if self.hover_enabled else None)
-                    self._list_rows[photo['path']] = w
-                    self.grid_layout.addWidget(w, row, 0)
-                    self.thumb_loader.request(photo['path']); row+=1
-            return
-
-        # ── Grid / Compact ──────────────────────────
-        ts = 80 if self.view_mode == "compact" else 160
-        card_w = self.COMPACT_CARD_WIDTH if self.view_mode == "compact" else self.GRID_CARD_WIDTH
-        vw = self.scroll.viewport().width() or 800
-        cols = max(1, (vw - 36) // (card_w + 8))
-
-        items = [('f',fp) for fp in self._subfolders] + [('p',ph) for ph in self.filtered]
-        need_photo_sep = has_f and has_p
-        sep_inserted = False
-        gi = 0
-
-        for item_type, item_data in items:
-            if need_photo_sep and item_type=='p' and not sep_inserted:
-                sep_inserted = True
-                if gi % cols != 0:
-                    gi = ((gi // cols) + 1) * cols
-                sr = gi // cols
-                self.grid_layout.addWidget(self._sep("🖼️  Foto"), sr, 0, 1, cols)
-                gi = (sr+1) * cols
-
-            r, c = divmod(gi, cols)
-            if item_type == 'f':
-                card = FolderCard(item_data, ts)
-                card.setFixedWidth(card_w)
-                self._folder_widgets[item_data] = card
-                self._item_pos[item_data] = (r, c)
-                card.clicked.connect(lambda p=item_data, w=card: self._select(p, w))
-                card.double_clicked.connect(lambda p=item_data: self.load_folder(p))
-                self.grid_layout.addWidget(card, r, c)
-            else:
-                photo = item_data
-                pidx = self.filtered.index(photo)
-                card = PhotoCard(photo, ts)
-                card.setFixedWidth(card_w)
-                self._item_pos[photo['path']] = (r, c)
-                card.clicked.connect(lambda p=photo, w=card: self._select(p['path'], w))
-                card.double_clicked.connect(lambda p=photo, i=pidx: self._card_click(p, i))
-                card.hovered.connect(lambda p=photo: self.photo_selected.emit(p['path']) if self.hover_enabled else None)
-                card.fav_toggled.connect(self._on_fav)
-                self._cards[photo['path']] = card
-                self.grid_layout.addWidget(card, r, c)
-                self.thumb_loader.request(photo['path'])
-            gi += 1
-
-        if True:
-            # Compact: fixed-size cards, align left — no stretch
-            self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-            for col in range(cols):
-                self.grid_layout.setColumnStretch(col, 0)
-                self.grid_layout.setColumnMinimumWidth(col, card_w)
+        items = []
+        if self._is_drives_view:
+            import string
+            drives = [f"{l}:\\" for l in string.ascii_uppercase if os.path.exists(f"{l}:\\")]
+            si = self.sort_combo.currentIndex()
+            drives.sort(key=lambda x: x.lower(), reverse=si in (3, 9))
+            items.append(('s', "💾  Drive"))
+            for d in drives: items.append(('d', d))
+        elif getattr(self, "_is_quick_access_view", False):
+            home = os.path.expanduser("~")
+            folders = [os.path.join(home, f) for f in ["Pictures", "Desktop", "Downloads", "Documents", "Videos", "Music"]] + [home]
+            valid = [f for f in folders if os.path.isdir(f)]
+            items.append(('s', "⚡  Akses Cepat"))
+            for f in valid: items.append(('f', f))
         else:
-            # Grid: cards expand equally to fill width
-            self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-            for col in range(cols):
-                self.grid_layout.setColumnStretch(col, 0)
-                self.grid_layout.setColumnMinimumWidth(col, card_w)
+            if self._subfolders:
+                items.append(('s', "📁  Subfolder"))
+                for f in self._subfolders: items.append(('f', f))
+            if self.filtered:
+                if self._subfolders: items.append(('s', "🖼️  Foto"))
+                for p in self.filtered:
+                    items.append(('p', p))
+                    self.thumb_loader.request(p['path'])
+        
+        if not items:
+            items.append(('s', "📂  Folder Kosong"))
+            
+        self.model.set_items(items)
         self._restore_selection_state()
-        self._restore_pending_scroll(finalize=False)
+        self._restore_pending_scroll(finalize=True)
 
     def _sep(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -612,10 +748,7 @@ class GalleryPanel(QWidget):
         lbl.setFixedHeight(22); return lbl
 
     def _on_thumb_ready(self, path: str, thumb: str):
-        card = self._cards.get(path)
-        if card: card.set_thumb(thumb)
-        row = self._list_rows.get(path)
-        if row: row.set_thumb(thumb)
+        pass
 
     def export_state(self) -> dict:
         current_location = "__drives__" if self._is_drives_view else self.current_folder
@@ -638,39 +771,47 @@ class GalleryPanel(QWidget):
             "hover_enabled": self.hover_enabled,
             "search_text": self.search.text(),
             "sort_index": self.sort_combo.currentIndex(),
-            "scroll_x": self.scroll.horizontalScrollBar().value(),
-            "scroll_y": self.scroll.verticalScrollBar().value(),
+            "scroll_x": self.view.horizontalScrollBar().value(),
+            "scroll_y": self.view.verticalScrollBar().value(),
         }
 
     def restore_state(self, state: dict):
         if not isinstance(state, dict):
             return
 
+        # 1. Pulihkan Lokasi Terlebih Dahulu (Penting untuk sinkronisasi view mode)
+        current_location = state.get("current_location")
+        if current_location == "__drives__":
+            self.load_folder("__drives__", _push=False)
+        elif current_location == "__quick_access__":
+            self.load_folder("__quick_access__", _push=False)
+        elif isinstance(current_location, str) and os.path.isdir(current_location):
+            self.load_folder(current_location, _push=False)
+
+        # 2. Pulihkan View Mode
         view_mode = state.get("view_mode")
         if view_mode in self._view_btns:
-            self.view_mode = view_mode
-            for mode, btn in self._view_btns.items():
-                btn.setChecked(mode == view_mode)
+            self._set_view(view_mode)
 
+        # 3. Pulihkan Filter dan Pencarian
         active_filter = state.get("active_filter")
         if active_filter in self.filter_btns:
-            self.active_filter = active_filter
-            for key, btn in self.filter_btns.items():
-                btn.setChecked(key == active_filter)
+            self._set_filter(active_filter)
 
         hover_enabled = state.get("hover_enabled", True)
         self.hover_enabled = hover_enabled
         if hasattr(self, 'btn_hover'):
             self.btn_hover.setChecked(hover_enabled)
 
-        sort_index = state.get("sort_index")
-        if isinstance(sort_index, int) and 0 <= sort_index < self.sort_combo.count():
-            self.sort_combo.setCurrentIndex(sort_index)
-
         search_text = state.get("search_text")
         if isinstance(search_text, str):
             self.search.setText(search_text)
 
+        sort_index = state.get("sort_index")
+        if isinstance(sort_index, int) and 0 <= sort_index < self.sort_combo.count():
+            self.sort_combo.setCurrentIndex(sort_index)
+
+        # 4. Pulihkan Riwayat dan Seleksi
         self._nav_history = [
             path for path in state.get("nav_history", [])
             if path == "__drives__" or os.path.isdir(path)
@@ -684,194 +825,49 @@ class GalleryPanel(QWidget):
         if isinstance(scroll_x, int) and isinstance(scroll_y, int):
             self._pending_restore_scroll = (scroll_x, scroll_y)
 
-        current_location = state.get("current_location")
-        if current_location == "__drives__":
-            self.load_folder("__drives__", _push=False)
-        elif isinstance(current_location, str) and os.path.isdir(current_location):
-            self.load_folder(current_location, _push=False)
-        else:
-            self._restore_selection_state()
-            self._restore_pending_scroll(finalize=False)
+        self._restore_selection_state()
+        self._restore_pending_scroll(finalize=False)
 
     def _restore_selection_state(self):
-        # Prioritaskan path yang sedang direstorasi, jika tidak ada gunakan yang terakhir dipilih
         path = self._pending_restore_selection or self._sel_path
-        if not path:
-            return
+        if not path: return
 
-        widget = (self._cards.get(path) or self._list_rows.get(path)
-                  or self._folder_widgets.get(path))
-
-        if widget:
-            # Sorot widget secara visual (widget=None agar tidak double scroll)
-            self._select(path, widget=None)
-
-            # Jika sedang memulihkan seleksi (setelah startup atau pindah folder)
-            if self._pending_restore_selection == path:
-                self._pending_restore_scroll = None
-                
-                # Memaksa kontainer untuk sinkronisasi geometri. Tanpa ini, 
-                # ensureWidgetVisible sering gagal karena tinggi widget dianggap 0.
-                self.grid_widget.adjustSize()
-
-                # NOTE: Revisit later. In very large folders, ensureWidgetVisible 
-                # sometimes fails to align correctly due to layout race conditions.
-                def perform_scroll():
-                    try:
-                        # Check if widget still exists and is visible
-                        if not widget.isHidden():
-                            self.scroll.ensureWidgetVisible(widget, 50, 150)
-                    except RuntimeError:
-                        # Occurs if widget was deleted (e.g. folder changed) before timer fired
-                        pass
-                
-                QTimer.singleShot(500, perform_scroll)
-                self._pending_restore_selection = None
-            return True
+        for i in range(self.model.rowCount()):
+            idx = self.model.index(i)
+            if idx.data(GalleryModel.PathRole) == path:
+                self.view.setCurrentIndex(idx)
+                if self._pending_restore_selection == path:
+                    self.view.scrollTo(idx)
+                    self._pending_restore_selection = None
+                return True
         return False
 
     def _restore_pending_scroll(self, finalize: bool):
         if self._pending_restore_scroll is None:
             return
         sx, sy = self._pending_restore_scroll
-
-        def apply():
-            self.scroll.horizontalScrollBar().setValue(sx)
-            self.scroll.verticalScrollBar().setValue(sy)
-
-        QTimer.singleShot(100, apply)
+        QTimer.singleShot(100, lambda: self.view.horizontalScrollBar().setValue(sx))
+        QTimer.singleShot(100, lambda: self.view.verticalScrollBar().setValue(sy))
         if finalize:
             self._pending_restore_scroll = None
 
     def _select(self, path: str, widget=None):
-        """Single click: highlight + preview. Hover does NOT clear selection."""
-        self._sel_path = path
-        # Update photo cards
-        for p, card in self._cards.items(): card.set_selected(p == path)
-        # Update list rows
-        for p, row in self._list_rows.items(): row.set_selected(p == path)
-        # Update folder widgets (FolderCard, FolderRow, DriveCard)
-        for p, fw in self._folder_widgets.items(): fw.set_selected(p == path)
-        # Emit preview only for image files
-        if os.path.isfile(path):
-            self.photo_selected.emit(path)
-        # Scroll grid_widget so selected item is visible
-        if widget:
-            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(widget, 20, 20))
-        self.setFocus()
+        # Metode ini tidak lagi diperlukan secara manual karena ditangani oleh 
+        # QListView selection model, namun tetap ada untuk kompatibilitas internal jika dipanggil.
+        pass
 
     def keyPressEvent(self, e: QKeyEvent):
         key = e.key()
         if key == Qt.Key.Key_Left and e.modifiers() & Qt.KeyboardModifier.AltModifier:
             self._nav_back(); return
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
-            self._move_sel(key); return
-        if key == Qt.Key.Key_Home:
-            self._jump_to_index(0); return
-        if key == Qt.Key.Key_End:
-            self._jump_to_index(len(self._all_items) - 1); return
-        if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
-            self._page_move(key); return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._activate_sel(); return
         super().keyPressEvent(e)
 
-    def _move_sel(self, key):
-        if not self._all_items: return
-        cur = next((i for i,(t,d) in enumerate(self._all_items)
-                    if (d if t=='f' else d['path']) == self._sel_path), -1)
-        n = len(self._all_items)
-
-        if self.view_mode == 'list':
-            # List: simple up/down, no wrapping
-            step = -1 if key == Qt.Key.Key_Up else 1
-            nxt = max(0, min(n - 1, max(cur, 0) + step))
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            # Left/Right: step ±1 with wrapping across rows (original behaviour)
-            step = -1 if key == Qt.Key.Key_Left else 1
-            nxt = max(0, min(n - 1, max(cur, 0) + step))
-        else:
-            # Up/Down: use visual (row, col) positions to navigate correctly
-            # even across the folder/photo separator gap
-            cur_path = self._sel_path
-            cur_pos  = self._item_pos.get(cur_path, (0, 0))
-            cur_row, cur_col = cur_pos
-            target_row = cur_row - 1 if key == Qt.Key.Key_Up else cur_row + 1
-
-            # Find item whose visual row is closest to target_row
-            # and whose col is closest to cur_col
-            best_idx  = -1
-            best_dist = None
-            for i, (t, d) in enumerate(self._all_items):
-                p = d if t == 'f' else d['path']
-                pos = self._item_pos.get(p)
-                if pos is None: continue
-                r, c = pos
-                if key == Qt.Key.Key_Up:
-                    if r >= cur_row: continue   # must be above
-                elif key == Qt.Key.Key_Down:
-                    if r <= cur_row: continue   # must be below
-
-                row_dist = abs(r - target_row)
-                col_dist = abs(c - cur_col)
-                dist = row_dist * 100 + col_dist   # row distance dominates
-                if best_dist is None or dist < best_dist:
-                    best_dist = dist
-                    best_idx  = i
-
-            nxt = best_idx if best_idx >= 0 else cur
-
-        nxt = max(0, min(n - 1, nxt))
-        t, d = self._all_items[nxt]
-        path = d if t == 'f' else d['path']
-        w = (self._cards.get(path) or self._list_rows.get(path)
-             or self._folder_widgets.get(path))
-        self._select(path, w)
-
-    def _jump_to_index(self, idx: int):
-        if not self._all_items or idx < 0 or idx >= len(self._all_items): return
-        t, d = self._all_items[idx]
-        path = d if t == 'f' else d['path']
-        w = (self._cards.get(path) or self._list_rows.get(path)
-             or self._folder_widgets.get(path))
-        self._select(path, w)
-
-    def _page_move(self, key):
-        if not self._all_items:
-            return
-
-        cur = next((i for i, (t, d) in enumerate(self._all_items)
-                    if (d if t == 'f' else d['path']) == self._sel_path), 0)
-        direction = -1 if key == Qt.Key.Key_PageUp else 1
-
-        if self.view_mode == 'list':
-            row_h = 56
-            visible_rows = max(1, self.scroll.viewport().height() // row_h)
-            step = visible_rows
-        else:
-            card_w = self.COMPACT_CARD_WIDTH if self.view_mode == "compact" else self.GRID_CARD_WIDTH
-            cols = max(1, (self.scroll.viewport().width() - 36) // (card_w + 8))
-            row_h = 120 if self.view_mode == "compact" else 210
-            visible_rows = max(1, self.scroll.viewport().height() // row_h)
-            step = max(1, visible_rows * cols)
-
-        nxt = max(0, min(len(self._all_items) - 1, cur + direction * step))
-        t, d = self._all_items[nxt]
-        path = d if t == 'f' else d['path']
-        w = (self._cards.get(path) or self._list_rows.get(path)
-             or self._folder_widgets.get(path))
-        self._select(path, w)
-
     def _activate_sel(self):
-        if not self._sel_path: return
-        for t, d in self._all_items:
-            p = d if t=='f' else d['path']
-            if p == self._sel_path:
-                if t == 'f': self.load_folder(p)
-                else:
-                    idx = next((i for i,ph in enumerate(self.filtered) if ph['path']==p), 0)
-                    self._card_click(d, idx)
-                break
+        idx = self.view.currentIndex()
+        if idx.isValid():
+            self._on_view_double_clicked(idx)
 
     def _card_click(self, photo: dict, index: int):
         lb = Lightbox(self.filtered, index, self)
@@ -881,8 +877,14 @@ class GalleryPanel(QWidget):
         if 0 <= lb.current < len(self.filtered):
             target_photo = self.filtered[lb.current]
             path = target_photo['path']
-            widget = self._cards.get(path) or self._list_rows.get(path)
-            self._select(path, widget)
+            
+            # Cari item di model untuk disinkronkan seleksinya
+            for i in range(self.model.rowCount()):
+                idx = self.model.index(i)
+                if idx.data(GalleryModel.PathRole) == path:
+                    self.view.setCurrentIndex(idx)
+                    self.view.scrollTo(idx)
+                    break
 
     def _on_fav(self, path: str):
         new = toggle_fav(path)
@@ -894,6 +896,8 @@ class GalleryPanel(QWidget):
         super().resizeEvent(event)
         if self._is_drives_view:
             QTimer.singleShot(80, self._show_drives_view)
+        elif getattr(self, "_is_quick_access_view", False):
+            QTimer.singleShot(80, self._show_quick_access_view)
         else:
             QTimer.singleShot(80, self._render_grid)
 
@@ -1014,8 +1018,8 @@ class PhotoCard(QFrame):
         self.tag_layout.setContentsMargins(0,0,0,0); self.tag_layout.setSpacing(3)
         self.tag_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         L.addWidget(self.tag_container)
-        # TEMPORARY: Nonaktifkan visual tag agar kembali ke tampilan awal
-        # self._render_tags()
+        # Re-enable visual tags (v4 standard)
+        self._render_tags()
 
         name = photo.get('name','')
         if len(name)>22: name=name[:20]+"…"
@@ -1154,9 +1158,9 @@ class LightboxClickableLabel(QLabel):
 
 # ── Lightbox ──────────────────────────────────────
 class Lightbox(QDialog):
-    def __init__(self, photos: list[dict], index: int, parent=None):
+    def __init__(self, photos: list[dict], index: int, parent=None, source="gallery"):
         super().__init__(parent)
-        self.photos=photos; self.current=index
+        self.photos=photos; self.current=index; self.source=source
         self._zoom_level = 0  # 0: Fit, 1: 100%
         self._zoom_allowed = False
         
@@ -1176,12 +1180,20 @@ class Lightbox(QDialog):
         TL.addWidget(self.lbl_name); TL.addStretch()
         self.lbl_idx=QLabel(""); self.lbl_idx.setStyleSheet("color:#5a5a90;font-size:12px;")
         TL.addWidget(self.lbl_idx)
-        close=QPushButton("✕"); close.setFixedSize(32,32)
-        close.setStyleSheet("QPushButton{background:rgba(255,255,255,.08);border:none;"
-            "border-radius:16px;color:#fff;font-size:14px;}"
+        
+        # Sesuaikan tombol tutup berdasarkan sumber
+        close_text = "✕ Kembali ke Peta" if self.source == "map" else "✕"
+        self.btn_close = QPushButton(close_text)
+        if self.source == "map":
+            self.btn_close.setFixedWidth(140)
+        else:
+            self.btn_close.setFixedSize(32, 32)
+            
+        self.btn_close.setStyleSheet("QPushButton{background:rgba(255,255,255,.08);border:none;"
+            "border-radius:16px;color:#fff;font-size:12px;}"
             "QPushButton:hover{background:rgba(255,255,255,.2);}")
-        close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        close.clicked.connect(self.close); TL.addWidget(close); L.addWidget(top)
+        self.btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_close.clicked.connect(self.close); TL.addWidget(self.btn_close); L.addWidget(top)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)

@@ -54,6 +54,11 @@ def get_stylesheet(theme_name="Astro Dark"):
 
     p = palettes.get(theme_name, palettes["Astro Dark"])
 
+    # Tentukan warna teks seleksi (Hitam untuk tema terang, Putih untuk tema gelap)
+    sel_text_color = "#ffffff"
+    if theme_name in ["Windows Light", "Snow White"]:
+        sel_text_color = p['text']
+
     return f"""
 /* ── Global ─────────────────────────────── */
 QWidget {{
@@ -66,8 +71,7 @@ QWidget {{
 
 QAbstractItemView, QTreeView, QListView {{
     selection-background-color: {p['accent']};
-    selection-background-color: {p['accent']}; /* Double define to ensure override */
-    selection-color: #ffffff;
+    selection-color: {sel_text_color};
     alternate-background-color: transparent;
     show-decoration-selected: 1;
     outline: none;
@@ -252,13 +256,13 @@ QTreeWidget::item:selected,
 QTreeWidget::branch:selected {{
     background-color: {p['accent']};
     selection-background-color: {p['accent']};
-    color: #ffffff;
+    color: {sel_text_color};
 }}
 QTreeWidget::item:selected:!active, 
 QTreeWidget::branch:selected:!active {{
     background-color: {p['accent']};
     selection-background-color: {p['accent']};
-    color: #ffffff;
+    color: {sel_text_color};
 }}
 /* QTreeWidget::branch — intentionally NOT overridden here so Qt's
    default expand/collapse arrows remain visible. Background is

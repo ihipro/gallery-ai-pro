@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt, Signal, QPointF, QPoint
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPolygonF, QCursor
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPolygonF, QCursor, QPen
 import os
 
 # Special marker emitted when user clicks the "💾 Drive" header
 DRIVES_MARKER = "__drives__"
+QUICK_ACCESS_MARKER = "__quick_access__"
 
 
 # ── Custom proxy style: always-visible tree arrows ───────────────────────────
@@ -27,9 +28,6 @@ class TreeArrowStyle(QProxyStyle):
     Draws tree branch arrows in a visible color so they are always
     shown against the dark background — not just on hover.
     """
-    ARROW_NORMAL   = QColor("#6b6b9a")   # muted — always visible
-    ARROW_SELECTED = QColor("#a78bfa")   # accent — on selected/hovered row
-
     def drawPrimitive(self, element, option, painter, widget=None):
         if element == QStyle.PrimitiveElement.PE_IndicatorBranch:
             # Only draw arrow if this item HAS children
@@ -37,34 +35,44 @@ class TreeArrowStyle(QProxyStyle):
                 return   # leaf node — draw nothing
 
             r    = option.rect
+            
+            # Gunakan seluruh dimensi rect untuk menentukan titik tengah yang akurat
             cx   = r.x() + r.width()  / 2.0
             cy   = r.y() + r.height() / 2.0
             half = min(r.width(), r.height()) * 0.30
 
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Deteksi seleksi yang lebih kuat: Ambil item di koordinat Y yang sama (tengah baris)
+            is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            if not is_selected and widget:
+                # Cek item di tengah viewport pada ketinggian yang sama dengan branch ini
+                target_item = widget.itemAt(QPoint(widget.viewport().width() // 2, cy))
+                if target_item:
+                    is_selected = target_item.isSelected()
+
+            is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+            accent_color = widget.palette().highlight().color()
+            text_color = widget.palette().windowText().color()
+
+            if is_selected:
+                # Background baris adalah warna aksen, paksa Putih agar kontras
+                painter.setBrush(QColor("#ffffff"))
+            elif is_hover:
+                painter.setBrush(accent_color)
+            else:
+                painter.setBrush(text_color)
+                painter.setOpacity(0.7)
+
             painter.setPen(Qt.PenStyle.NoPen)
 
-            # Always visible — highlight on hover
-            if option.state & QStyle.StateFlag.State_MouseOver:
-                painter.setBrush(self.ARROW_SELECTED)
-            else:
-                painter.setBrush(self.ARROW_NORMAL)
-
             if option.state & QStyle.StateFlag.State_Open:
-                # Expanded → pointing down ▼
-                poly = QPolygonF([
-                    QPointF(cx - half, cy - half * 0.5),
-                    QPointF(cx + half, cy - half * 0.5),
-                    QPointF(cx,        cy + half),
-                ])
+                # Expanded ▼
+                poly = QPolygonF([QPointF(cx - half, cy - half * 0.5), QPointF(cx + half, cy - half * 0.5), QPointF(cx, cy + half)])
             else:
-                # Collapsed → pointing right ▶
-                poly = QPolygonF([
-                    QPointF(cx - half * 0.5, cy - half),
-                    QPointF(cx + half,        cy),
-                    QPointF(cx - half * 0.5, cy + half),
-                ])
+                # Collapsed ▶
+                poly = QPolygonF([QPointF(cx - half * 0.5, cy - half), QPointF(cx + half, cy), QPointF(cx - half * 0.5, cy + half)])
 
             painter.drawPolygon(poly)
             painter.restore()
@@ -191,6 +199,7 @@ class FolderTreeWidget(QWidget):
 
         # Akses Cepat
         quick = QTreeWidgetItem(self.tree, ["⚡  Akses Cepat"])
+        quick.setData(0, Qt.ItemDataRole.UserRole, QUICK_ACCESS_MARKER)
         quick.setExpanded(True)
         home = os.path.expanduser("~")
         username = os.path.basename(home.rstrip("\\/")) or home
@@ -230,27 +239,40 @@ class FolderTreeWidget(QWidget):
         self._add_subfolders(root_item, root_path)
 
     def export_state(self) -> dict:
-        expanded_paths: list[str] = []
-        selected_path = None
+        # Simpan tuple (indeks_top_level, path) untuk menghindari ambiguitas Akses Cepat vs Drive
+        expanded_data: list[tuple[int, str]] = []
+        selected_data: tuple[int, str] | None = None
 
-        current = self.tree.currentItem()
-        if current:
-            selected_path = current.data(0, Qt.ItemDataRole.UserRole)
+        curr = self.tree.currentItem()
+        if curr:
+            path = curr.data(0, Qt.ItemDataRole.UserRole)
+            # Cari index top level untuk item yang dipilih
+            t_idx = -1
+            tmp = curr
+            while tmp:
+                if not tmp.parent():
+                    for i in range(self.tree.topLevelItemCount()):
+                        if tmp == self.tree.topLevelItem(i):
+                            t_idx = i; break
+                tmp = tmp.parent()
+                if t_idx != -1: break
+            if path:
+                selected_data = (t_idx, path)
 
-        def walk(item: QTreeWidgetItem):
+        def walk(item: QTreeWidgetItem, top_idx: int):
             path = item.data(0, Qt.ItemDataRole.UserRole)
             if path and item.isExpanded():
-                expanded_paths.append(path)
+                expanded_data.append((top_idx, path))
             for i in range(item.childCount()):
-                walk(item.child(i))
+                walk(item.child(i), top_idx)
 
         for i in range(self.tree.topLevelItemCount()):
-            walk(self.tree.topLevelItem(i))
+            walk(self.tree.topLevelItem(i), i)
 
         return {
             "custom_root_path": self._custom_root_path,
-            "expanded_paths": expanded_paths,
-            "selected_path": selected_path,
+            "expanded_data": expanded_data,
+            "selected_data": selected_data,
             "scroll_x": self.tree.horizontalScrollBar().value(),
             "scroll_y": self.tree.verticalScrollBar().value(),
         }
@@ -265,19 +287,34 @@ class FolderTreeWidget(QWidget):
         else:
             self._populate_defaults()
 
-        expanded_paths = [
-            path for path in state.get("expanded_paths", [])
-            if isinstance(path, str) and path
-        ]
-        expanded_paths.sort(key=lambda path: path.count("\\"))
-        for path in expanded_paths:
-            self._expand_to_path(path)
+        # Ambil data ekspansi (mendukung format lama expanded_paths atau format baru expanded_data)
+        expanded_items = state.get("expanded_data") or []
+        
+        # Sort berdasarkan kedalaman path agar ekspansi berurutan dari root ke leaf
+        expanded_items.sort(key=lambda x: x[1].count("\\") if isinstance(x, (list, tuple)) else 0)
+        
+        for item in expanded_items:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                top_idx, path = item
+                self._expand_to_path(path, top_level_index=top_idx)
+                target = self._find_item_by_path(path, top_level_index=top_idx)
+                if target:
+                    target.setExpanded(True)
 
-        selected_path = state.get("selected_path")
-        if isinstance(selected_path, str) and selected_path:
-            item = self._find_item_by_path(selected_path)
+        # Restorasi seleksi dengan presisi cabang
+        sel_data = state.get("selected_data")
+        if sel_data and isinstance(sel_data, (list, tuple)) and len(sel_data) == 2:
+            t_idx, path = sel_data
+            # Pastikan folder tujuan terbuka sebelum dipilih
+            self._expand_to_path(path, top_level_index=t_idx)
+            item = self._find_item_by_path(path, top_level_index=t_idx)
             if item:
                 self.tree.setCurrentItem(item)
+                self.folder_selected.emit(path)
+        else:
+            # Fallback untuk format lama
+            old_path = state.get("selected_path")
+            if old_path: self.select_path(old_path)
 
         scroll_x = state.get("scroll_x", 0)
         scroll_y = state.get("scroll_y", 0)
@@ -289,40 +326,75 @@ class FolderTreeWidget(QWidget):
         if not isinstance(path, str) or not path:
             return
 
-        if path == DRIVES_MARKER:
-            item = self._find_item_by_path(DRIVES_MARKER)
-            if item:
-                self.tree.setCurrentItem(item)
-                self.tree.scrollToItem(item)
-            return
+        norm_target = os.path.normpath(path).lower()
 
-        if not os.path.isdir(path):
-            parent = os.path.dirname(path)
-            if not parent:
-                return
-            path = parent
+        # 1. Jika item yang dipilih sekarang sudah benar jalurnya, abaikan.
+        curr = self.tree.currentItem()
+        if curr:
+            u_data = curr.data(0, Qt.ItemDataRole.UserRole)
+            if u_data and not str(u_data).startswith("__"):
+                if os.path.normpath(str(u_data)).lower() == norm_target:
+                    return
 
-        self._expand_to_path(path)
+        # 2. Tentukan indeks cabang prioritas (Drive untuk path fisik)
+        pref_idx = -1
+        if not path.startswith("__"):
+            for i in range(self.tree.topLevelItemCount()):
+                if self.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) == DRIVES_MARKER:
+                    pref_idx = i; break
+
+        # 3. Cari apakah item sudah ada di tree
         item = self._find_item_by_path(path)
-        if not item and os.path.isdir(path):
-            self.populate(path)
-            item = self._find_item_by_path(path)
+        
+        # 4. Jika item ada, buka leluhurnya. Jika tidak, lakukan lazy load di Drive.
+        if item:
+            # Identifikasi cabang dari item yang ditemukan
+            actual_idx = -1
+            tmp = item
+            while tmp:
+                if not tmp.parent():
+                    for i in range(self.tree.topLevelItemCount()):
+                        if tmp == self.tree.topLevelItem(i):
+                            actual_idx = i; break
+                tmp = tmp.parent()
+                if actual_idx != -1: break
+            self._expand_to_path(path, top_level_index=actual_idx)
+        elif os.path.isdir(path) and pref_idx != -1:
+            self._expand_to_path(path, top_level_index=pref_idx)
+            item = self._find_item_by_path(path, top_level_index=pref_idx)
 
         if item:
             self.tree.setCurrentItem(item)
             self.tree.scrollToItem(item)
 
-    def _expand_to_path(self, path: str):
-        for ancestor in self._path_ancestors(path):
-            item = self._find_item_by_path(ancestor)
+    def _expand_to_path(self, path: str, top_level_index: int = None):
+        if top_level_index is None:
+            # Jika ekspansi global, tentukan cabang prioritas (Drive untuk path fisik)
+            if path and not path.startswith("__"):
+                for i in range(self.tree.topLevelItemCount()):
+                    if self.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) == DRIVES_MARKER:
+                        top_level_index = i; break
+
+        ancestors = self._path_ancestors(path)
+        # Hanya buka folder induk (parents), jangan buka folder tujuan itu sendiri (target)
+        for ancestor in ancestors[:-1]: 
+            item = self._find_item_by_path(ancestor, top_level_index=top_level_index)
             if item:
+                # FIX: Mencegah ekspansi otomatis pada shortcut Akses Cepat (User, Pictures, dll).
+                # Kita biarkan folder favorit tersebut tetap tertutup kecuali user membukanya sendiri.
+                if top_level_index == 0:
+                    p = item.parent()
+                    if p and not p.parent():
+                        # Ini adalah anak langsung dari root 'Akses Cepat'
+                        continue
+
                 if (item.childCount() == 1 and item.child(0).text(0) == "__placeholder__"):
                     item.takeChildren()
                     self._add_subfolders(item, ancestor)
                 item.setExpanded(True)
 
     def _path_ancestors(self, path: str) -> list[str]:
-        if path == DRIVES_MARKER:
+        if path in (DRIVES_MARKER, QUICK_ACCESS_MARKER):
             return [path]
 
         norm = os.path.normpath(path)
@@ -338,21 +410,70 @@ class FolderTreeWidget(QWidget):
             ancestors.append(current)
         return ancestors
 
-    def _find_item_by_path(self, path: str) -> QTreeWidgetItem | None:
-        def walk(item: QTreeWidgetItem):
-            if item.data(0, Qt.ItemDataRole.UserRole) == path:
-                return item
-            for idx in range(item.childCount()):
-                found = walk(item.child(idx))
-                if found:
-                    return found
+    def _find_item_by_path(self, path: str, top_level_index: int = None) -> QTreeWidgetItem | None:
+        matches = []
+        if path is None:
             return None
 
-        for i in range(self.tree.topLevelItemCount()):
-            found = walk(self.tree.topLevelItem(i))
-            if found:
-                return found
-        return None
+        # Normalisasi path (Windows case-insensitive)
+        target = os.path.normpath(path).lower() if not path.startswith("__") else path
+
+        def walk(item: QTreeWidgetItem, top_idx: int):
+            u_data = item.data(0, Qt.ItemDataRole.UserRole)
+            u_norm = os.path.normpath(u_data).lower() if u_data and not str(u_data).startswith("__") else u_data
+            if u_norm == target:
+                matches.append((item, top_idx))
+            for idx in range(item.childCount()):
+                walk(item.child(idx), top_idx)
+
+        # Jika top_level_index ditentukan, batasi pencarian HANYA pada cabang tersebut
+        if top_level_index is not None and top_level_index < self.tree.topLevelItemCount():
+            walk(self.tree.topLevelItem(top_level_index), top_level_index)
+        else:
+            for i in range(self.tree.topLevelItemCount()):
+                walk(self.tree.topLevelItem(i), i)
+
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0][0]
+
+        # STRATEGI SELEKSI CERDAS (Menangani Jalur Ganda)
+
+        # 1. Identifikasi cabang aktif saat ini
+        curr = self.tree.currentItem()
+        curr_branch = -1
+        if curr:
+            tmp = curr
+            while tmp:
+                if not tmp.parent():
+                    for i in range(self.tree.topLevelItemCount()):
+                        if tmp == self.tree.topLevelItem(i):
+                            curr_branch = i; break
+                tmp = tmp.parent()
+                if curr_branch != -1: break
+        
+        # 2. PRIORITAS UTAMA: Jika ada kecocokan di cabang yang sedang aktif, gunakan itu!
+        # Ini mengunci folder "User" di Akses Cepat agar tidak melompat ke Drive.
+        if curr_branch != -1:
+            for m, idx in matches:
+                if idx == curr_branch: return m
+
+        # 3. Prioritaskan item yang memang sedang dipilih secara fisik
+        for m, idx in matches:
+            if m == curr: return m
+
+        # 4. Jika pencarian global (startup/gallery sync) dan belum ada cabang aktif,
+        # PRIORITASKAN DRIVE (index > 0) untuk jalur fisik.
+        if not target.startswith("__"):
+            for m, idx in matches:
+                if idx > 0: return m
+
+        # 5. Prioritaskan item yang sudah terbuka (expanded)
+        for m, idx in matches:
+            if m.isExpanded(): return m
+
+        return matches[0][0]
 
     def _add_subfolders(self, parent_item: QTreeWidgetItem, path: str):
         try:
@@ -373,10 +494,10 @@ class FolderTreeWidget(QWidget):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if not path:
             return
-        # "💾 Drive" header → show drive list in right panel
-        if path == DRIVES_MARKER:
-            self.folder_selected.emit(DRIVES_MARKER)
-        # Normal folder or drive letter → load gallery
+        # Header khusus (Drive/Akses Cepat)
+        if path in (DRIVES_MARKER, QUICK_ACCESS_MARKER):
+            self.folder_selected.emit(path)
+        # Folder normal
         elif os.path.isdir(path):
             self.folder_selected.emit(path)
 
