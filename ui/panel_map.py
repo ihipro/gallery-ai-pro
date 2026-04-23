@@ -199,7 +199,7 @@ class MapPanel(QWidget):
         self.scroll_countries.setWidget(self.country_widget)
         fl.addWidget(self.scroll_countries)
 
-        # Row 2: Cities/Districts (Hidden initially)
+        # Row 2: Cities/Districts (Hidden initially) 
         self.scroll_cities = QScrollArea()
         self.scroll_cities.setWidgetResizable(True)
         self.scroll_cities.setFrameShape(QFrame.Shape.NoFrame)
