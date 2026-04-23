@@ -17,7 +17,7 @@ from PySide6.QtCore import Qt, Signal, QPointF, QPoint
 from PySide6.QtGui import QPixmap, QPainter, QColor, QPolygonF, QCursor, QPen
 import os
 
-# Special marker emitted when user clicks the "💾 Drive" header
+# Special marker emitted when user clicks the "💾 Drive" header 
 DRIVES_MARKER = "__drives__"
 QUICK_ACCESS_MARKER = "__quick_access__"
 

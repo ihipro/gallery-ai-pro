@@ -42,3 +42,6 @@ data/thumbs/
 
 # gallery database
 data/gallery.db
+
+*.db-shm
+*.db-wal

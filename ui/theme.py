@@ -54,7 +54,7 @@ def get_stylesheet(theme_name="Astro Dark"):
 
     p = palettes.get(theme_name, palettes["Astro Dark"])
 
-    # Tentukan warna teks seleksi (Hitam untuk tema terang, Putih untuk tema gelap)
+    # Tentukan warna teks seleksi (Hitam untuk tema terang, Putih untuk tema gelap) 
     sel_text_color = "#ffffff"
     if theme_name in ["Windows Light", "Snow White"]:
         sel_text_color = p['text']

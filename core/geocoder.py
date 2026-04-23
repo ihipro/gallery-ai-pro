@@ -13,7 +13,7 @@ except ImportError:
 from PySide6.QtCore import QSettings
 import time
 
-# Kamus sederhana untuk mengubah kode ISO Negara menjadi nama lengkap (Offline Mode)
+# Kamus sederhana untuk mengubah kode ISO Negara menjadi nama lengkap (Offline Mode) 
 COUNTRY_MAP = {
     'ID': 'Indonesia', 'JP': 'Jepang', 'US': 'USA', 'SG': 'Singapura',
     'MY': 'Malaysia', 'TH': 'Thailand', 'KR': 'Korea Selatan', 'CN': 'Tiongkok'

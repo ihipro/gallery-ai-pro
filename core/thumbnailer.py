@@ -14,7 +14,7 @@ import hashlib
 from pathlib import Path
 from PIL import Image, ImageOps
 
-Image.MAX_IMAGE_PIXELS = 100_000_000  # Lindungi dari file yang terlalu besar
+Image.MAX_IMAGE_PIXELS = 100_000_000  # Lindungi dari file yang terlalu besar 
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
