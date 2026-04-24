@@ -13,8 +13,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QSizePolicy, QStyle, QProxyStyle,
     QScrollArea, QFrame
 )
-from PySide6.QtCore import Qt, Signal, QPointF, QPoint
-from PySide6.QtGui import QPixmap, QPainter, QColor, QPolygonF, QCursor, QPen
+from PySide6.QtCore import Qt, Signal, QPointF, QPoint, QTimer
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPolygonF, QCursor, QPen, QWheelEvent
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    HAS_OPENGL = True
+except ImportError:
+    HAS_OPENGL = False
 import os
 
 # Special marker emitted when user clicks the "💾 Drive" header 
@@ -525,32 +530,39 @@ class FolderTreeWidget(QWidget):
 class ClickableLabel(QLabel):
     clicked_at = Signal(QPoint)
     dragged = Signal(QPoint)
+    wheel_zoomed = Signal(int, QPoint) # delta, pos
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.zoom_enabled = False
-        self._last_pos = QPoint()
+        self._last_pos_global = QPoint() # Menggunakan posisi global untuk drag
         self._press_pos = QPoint()
         self._is_drag_mode = False
+        self.setMouseTracking(True)
+
+    def wheelEvent(self, event: QWheelEvent):
+        self.wheel_zoomed.emit(event.angleDelta().y(), event.position().toPoint())
+        event.accept() # Pastikan event tidak diteruskan ke parent
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = event.pos()
-            self._last_pos = event.pos()
+            self._last_pos_global = event.globalPos() # Inisialisasi posisi global
             self._is_drag_mode = False
             # Hanya ubah kursor jadi menggenggam jika gambar bisa di-zoom/drag
-            if getattr(self, "zoom_enabled", False):
+            if self.zoom_enabled:
                 self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.MouseButton.LeftButton:
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self.zoom_enabled:
             # Jika pergerakan lebih dari 5 pixel, aktifkan mode drag
             if (event.pos() - self._press_pos).manhattanLength() > 5:
                 self._is_drag_mode = True
             
-            delta = event.pos() - self._last_pos
+            delta = event.globalPos() - self._last_pos_global # Hitung delta dari posisi global
             self.dragged.emit(delta)
+            self._last_pos_global = event.globalPos()  # Perbarui baseline global
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -568,7 +580,8 @@ class ClickableLabel(QLabel):
 class PreviewWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self._zoom_level = 0  # 0: Fit, 1: 50%, 2: 100%
+        self._zoom_level = 0  # 0: Fit, 1: 50%, 2: 100%, 3: Manual (Wheel)
+        self._scale_factor = 1.0
         self.setMinimumHeight(120)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -589,9 +602,15 @@ class PreviewWidget(QWidget):
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setObjectName("previewArea")
+        
+        # Aktifkan Hardware Acceleration jika tersedia
+        if HAS_OPENGL:
+            self.scroll_area.setViewport(QOpenGLWidget())
+            self.scroll_area.viewport().setUpdateBehavior(QOpenGLWidget.UpdateBehavior.PartialUpdate)
 
         self.img_label = ClickableLabel()
         self.img_label.clicked_at.connect(self._on_click_zoom)
+        self.img_label.wheel_zoomed.connect(self._on_wheel_zoom)
         self.img_label.dragged.connect(self._on_drag)
         
         self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -611,7 +630,12 @@ class PreviewWidget(QWidget):
         layout.addWidget(self.name_label)
 
         self._current_path = None
-        self._last_pixmap_size = QPoint(0, 0)
+        self._original_pixmap = QPixmap()
+        
+        # Timer untuk rendering halus setelah zoom selesai (Dual-Quality Scaling)
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setSingleShot(True)
+        self._smooth_timer.timeout.connect(self._apply_smooth_scale)
 
     def _on_click_zoom(self, pos: QPoint):
         if not self._current_path or not self.img_label.pixmap():
@@ -646,43 +670,110 @@ class PreviewWidget(QWidget):
             self.scroll_area.horizontalScrollBar().setValue(target_x - view_w // 2)
             self.scroll_area.verticalScrollBar().setValue(target_y - view_h // 2)
 
+    def _on_wheel_zoom(self, delta: int, pos: QPoint):
+        if not self._current_path or self._original_pixmap.isNull():
+            return
+
+        vw, vh = self.scroll_area.viewport().width(), self.scroll_area.viewport().height()
+        pw, ph = self._original_pixmap.width(), self._original_pixmap.height()
+        fit_scale = min(vw / pw, vh / ph)
+
+        # SINKRONISASI: Jika sebelumnya bukan mode manual (3), perbarui scale_factor
+        if self._zoom_level != 3:
+            if self._zoom_level == 0:
+                self._scale_factor = fit_scale
+            elif self._zoom_level == 1:
+                self._scale_factor = 0.5
+            elif self._zoom_level == 2:
+                self._scale_factor = 1.0
+            self._zoom_level = 3
+
+        # 1. Dapatkan posisi kursor relatif terhadap VIEWPORT (jendela yang tidak bergerak)
+        viewport_pos = self.scroll_area.viewport().mapFromGlobal(QCursor.pos())
+        
+        scroll_h = self.scroll_area.horizontalScrollBar()
+        scroll_v = self.scroll_area.verticalScrollBar()
+        
+        # HITUNG OFFSET: Jika gambar berukuran 'Fit', QLabel biasanya lebih besar dari Pixmap
+        # Kita harus mengurangi ruang kosong (centering offset) agar zoom tepat di kursor
+        pix_w = self.img_label.pixmap().width()
+        pix_h = self.img_label.pixmap().height()
+        off_x = max(0, (self.img_label.width() - pix_w) // 2)
+        off_y = max(0, (self.img_label.height() - pix_h) // 2)
+
+        # 2. Hitung posisi koordinat asli pada gambar (pixel location)
+        content_x = (scroll_h.value() + viewport_pos.x() - off_x) / self._scale_factor
+        content_y = (scroll_v.value() + viewport_pos.y() - off_y) / self._scale_factor
+
+        zoom_step = 1.15 if delta > 0 else 0.85
+        
+        # Batasi zoom in maksimal ke 300% (3.0) atau fit_scale jika gambar sangat kecil
+        self._scale_factor = max(fit_scale * 0.9, min(self._scale_factor * zoom_step, max(3.0, fit_scale)))
+
+        # Batas bawah: Jika lebih kecil dari Fit, kembalikan ke mode Fit (0)
+        if self._scale_factor <= fit_scale * 1.01:
+            self._zoom_level = 0
+            self.load(self._current_path)
+            return
+
+        self._update_display(Qt.TransformationMode.FastTransformation)
+        
+        # 3. HITUNG ULANG OFFSET setelah scale berubah untuk koreksi posisi scroll
+        new_pw = int(self._original_pixmap.width() * self._scale_factor)
+        new_ph = int(self._original_pixmap.height() * self._scale_factor)
+        new_label_w = max(vw, new_pw)
+        new_label_h = max(vh, new_ph)
+        new_off_x = max(0, (new_label_w - new_pw) // 2)
+        new_off_y = max(0, (new_label_h - new_ph) // 2)
+
+        scroll_h.setValue(int(content_x * self._scale_factor + new_off_x - viewport_pos.x()))
+        scroll_v.setValue(int(content_y * self._scale_factor + new_off_y - viewport_pos.y()))
+
+        # Jadwalkan render kualitas tinggi setelah user berhenti memutar roda
+        self._smooth_timer.start(200)
+
+    def _apply_smooth_scale(self):
+        self._update_display(Qt.TransformationMode.SmoothTransformation)
+
     def _on_drag(self, delta: QPoint):
         if self._zoom_level == 0: return
         h_bar = self.scroll_area.horizontalScrollBar()
         v_bar = self.scroll_area.verticalScrollBar()
         h_bar.setValue(h_bar.value() - delta.x())
         v_bar.setValue(v_bar.value() - delta.y())
-        # Update posisi terakhir agar pergerakan halus
-        self.img_label._last_pos = self.img_label.mapFromGlobal(QCursor.pos())
-
     def load(self, path: str):
         self._current_path = path
         self.name_label.setText(os.path.basename(path))
         try:
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                w, h = self.scroll_area.width() - 4, self.scroll_area.height() - 4
-
-                if self._zoom_level == 0:
-                    # Mode Fit: Selalu muat di dalam area pratinjau
-                    self.img_label.setCursor(Qt.CursorShape.PointingHandCursor)
-                    scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, 
-                                         Qt.TransformationMode.SmoothTransformation)
-                elif self._zoom_level == 1:
-                    # Mode 50%: Bisa di-drag
-                    self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
-                    scaled = pixmap.scaled(pixmap.size() * 0.5, Qt.AspectRatioMode.KeepAspectRatio, 
-                                         Qt.TransformationMode.SmoothTransformation)
-                else:
-                    # Mode 100%: Ukuran asli
-                    self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
-                    scaled = pixmap
-                
-                self.img_label.setPixmap(scaled)
-            else:
+            self._original_pixmap = QPixmap(path)
+            if self._original_pixmap.isNull():
                 self.img_label.setText("⚠️ Tidak bisa dimuat")
+                return
+                
+            self._update_display()
         except Exception as e:
             self.img_label.setText(f"Error: {e}")
+
+    def _update_display(self, mode=Qt.TransformationMode.SmoothTransformation):
+        if self._original_pixmap.isNull(): return
+        
+        w, h = self.scroll_area.width() - 4, self.scroll_area.height() - 4
+        self.img_label.zoom_enabled = (self._zoom_level > 0)
+
+        if self._zoom_level == 0:
+            self.img_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            scaled = self._original_pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, mode)
+        elif self._zoom_level == 1:
+            self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
+            scaled = self._original_pixmap.scaled(self._original_pixmap.size() * 0.5, Qt.AspectRatioMode.KeepAspectRatio, mode)
+        elif self._zoom_level == 2:
+            self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
+            scaled = self._original_pixmap
+        else: # Manual scale (Wheel)
+            self.img_label.setCursor(Qt.CursorShape.OpenHandCursor)
+            scaled = self._original_pixmap.scaled(self._original_pixmap.size() * self._scale_factor, Qt.AspectRatioMode.KeepAspectRatio, mode)
+
+        self.img_label.setPixmap(scaled)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
