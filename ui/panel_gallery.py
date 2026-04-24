@@ -17,14 +17,19 @@ from PySide6.QtWidgets import (
     QButtonGroup, QListView, QStyledItemDelegate, QStyle
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QAbstractListModel, QModelIndex, QSize, QRect
-from PySide6.QtGui import QPixmap, QCursor, QKeyEvent, QPainter, QColor, QFont, QPen
+from PySide6.QtGui import QPixmap, QCursor, QKeyEvent, QPainter, QColor, QFont, QPen, QWheelEvent
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    HAS_OPENGL = True
+except ImportError:
+    HAS_OPENGL = False
 from PySide6.QtWebChannel import QWebChannel
 import os, math
 
 from core.thumbnailer import ThumbLoader, FolderScanWorker, ScannerSignals
 from core.database import (
     init_db, upsert_photo, get_photos_in_folder,
-    update_tags, toggle_fav, get_stats
+    update_tags, toggle_fav, get_stats, get_videos_in_folder
 )
 
 init_db()
@@ -150,16 +155,28 @@ class GalleryDelegate(QStyledItemDelegate):
             painter.setFont(QFont("DM Sans", 9, QFont.Weight.Bold))
             painter.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, str(path))
         
-        elif item_type in ('f', 'd', 'p'):
+        elif item_type in ('f', 'd', 'p', 'v'):
             # Draw Thumbnail
             thumb_path = index.data(GalleryModel.ThumbRole)
-            thumb_rect = rect.adjusted(10, 10, -10, -40) if self.view_mode == "grid" else QRect(rect.x()+5, rect.y()+5, 40, 40)
+            
+            # Tentukan geometri thumbnail berdasarkan mode tampilan
+            if self.view_mode == "grid":
+                thumb_rect = rect.adjusted(10, 10, -10, -40)
+            elif self.view_mode == "compact":
+                thumb_rect = rect.adjusted(5, 5, -5, -25)
+            else: # list
+                thumb_rect = QRect(rect.x() + 5, rect.y() + 5, 40, 40)
             
             if thumb_path:
                 pix = QPixmap(thumb_path)
                 if not pix.isNull():
-                    # Skala gambar dengan mempertahankan rasio aspek asli agar tidak terlihat gepeng/tertarik
-                    scaled_pix = pix.scaled(thumb_rect.size(), 
+                    # Gunakan ukuran kotak yang sedikit lebih kecil untuk scaling agar ada padding
+                    scaling_size = thumb_rect.size()
+                    if self.view_mode == "list":
+                        # Di mode list, pastikan thumbnail tidak menyentuh batas baris
+                        scaling_size = QSize(40, 40)
+                        
+                    scaled_pix = pix.scaled(scaling_size, 
                                           Qt.AspectRatioMode.KeepAspectRatio, 
                                           Qt.TransformationMode.SmoothTransformation)
                     # Hitung koordinat agar gambar digambar tepat di tengah area thumb_rect
@@ -172,27 +189,45 @@ class GalleryDelegate(QStyledItemDelegate):
                 base_color = palette.base().color()
                 placeholder_bg = base_color.lighter(120) if base_color.lightness() < 128 else base_color.darker(110)
                 painter.fillRect(thumb_rect, placeholder_bg)
-                
+
                 painter.setPen(muted_color)
-                icon = "📁" if item_type in ('f', 'd') else "🖼️"
+                if item_type in ('f', 'd'): icon = "📁"
+                elif item_type == 'v': icon = "🎞️"
+                else: icon = "🖼️"
                 # Gunakan font yang lebih besar sesuai mode tampilan
-                icon_font_size = 42 if self.view_mode == "grid" else 20
+                if self.view_mode == "grid": icon_font_size = 42
+                elif self.view_mode == "compact": icon_font_size = 28
+                else: icon_font_size = 18
+                
                 painter.setFont(QFont("DM Sans", icon_font_size))
                 painter.drawText(thumb_rect, Qt.AlignmentFlag.AlignCenter, icon)
 
             # Draw Text
             name = os.path.basename(path) if item_type != 'd' else path
-            text_rect = rect.adjusted(5, rect.height()-30, -5, -5) if self.view_mode == "grid" else rect.adjusted(55, 0, -10, 0)
+            
+            # Tentukan geometri teks dan perataan (alignment)
+            if self.view_mode == "grid":
+                text_rect = rect.adjusted(5, rect.height() - 30, -5, -5)
+                align = Qt.AlignmentFlag.AlignCenter
+            elif self.view_mode == "compact":
+                text_rect = rect.adjusted(2, rect.height() - 22, -2, -2)
+                align = Qt.AlignmentFlag.AlignCenter
+            else: # list
+                text_rect = rect.adjusted(55, 0, -10, 0)
+                align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
             if is_sel:
                 # Jika tema terang (lightness > 128), gunakan warna teks gelap agar kontras dengan highlight transparan
                 painter.setPen(text_color if palette.base().color().lightness() > 128 else palette.highlightedText().color())
             else:
                 painter.setPen(muted_color)
-            painter.setFont(QFont("DM Sans", 8))
+                
+            font_size = 8 if self.view_mode != "list" else 9
+            painter.setFont(QFont("DM Sans", font_size))
             elided_name = painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, text_rect.width())
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter if self.view_mode == "grid" else Qt.AlignmentFlag.AlignVCenter, elided_name)
+            painter.drawText(text_rect, align, elided_name)
             
-            # Draw AI/Fav Icons for photos
+            # Draw AI/Fav Icons for photos only
             if item_type == 'p':
                 data = index.data(GalleryModel.DataRole)
                 if data.get('fav'):
@@ -218,7 +253,9 @@ class GalleryDelegate(QStyledItemDelegate):
             return QSize(170, 200)
         elif self.view_mode == "compact":
             return QSize(100, 120)
-        return QSize(option.rect.width(), 50) # List mode
+        else: # List mode
+            width = option.widget.width() if option.widget else 500
+            return QSize(width - 20, 50)
 
 
 class GalleryPanel(QWidget):
@@ -501,11 +538,11 @@ class GalleryPanel(QWidget):
         # Subfolders for navigation
         self._subfolders = self._get_subfolders(folder)
 
-        # DB photos (instant)
+        # DB media (instant) - Ambil foto DAN video
         db_photos = get_photos_in_folder(folder)
-        if db_photos:
-            self.photos = db_photos
-            self._photo_paths_cache = {p['path'] for p in db_photos}
+        db_videos = get_videos_in_folder(folder)
+        self.photos = db_photos + db_videos
+        self._photo_paths_cache = {p['path'] for p in self.photos}
 
         self._apply_filter()
         self._start_scan(folder)
@@ -630,7 +667,13 @@ class GalleryPanel(QWidget):
                 self._apply_filter()
                 self._restore_selection_state()
             else:
-                self.lbl_count.setText(f"Memindai... {n} foto ditemukan")
+                n_p = sum(1 for x in self.photos if 'duration' not in x)
+                n_v = sum(1 for x in self.photos if 'duration' in x)
+                parts = []
+                if self._subfolders: parts.append(f"{len(self._subfolders)} folder")
+                if n_p: parts.append(f"{n_p} foto")
+                if n_v: parts.append(f"{n_v} video")
+                self.lbl_count.setText("  ·  ".join(parts) if parts else "0 item")
 
     def _on_scan_done(self, token: int, total: int):
         if token != self._scan_token:
@@ -702,9 +745,15 @@ class GalleryPanel(QWidget):
             return p.get('file_size',0)
         result.sort(key=skey, reverse=si in (0,3,4,6,9))
         self.filtered = result
+
+        # Hitung jumlah berdasarkan tipe media untuk label pojok kanan atas
+        n_p = sum(1 for x in result if 'duration' not in x)
+        n_v = sum(1 for x in result if 'duration' in x)
+
         parts = []
         if self._subfolders: parts.append(f"{len(self._subfolders)} folder")
-        if result: parts.append(f"{len(result)} foto")
+        if n_p: parts.append(f"{n_p} foto")
+        if n_v: parts.append(f"{n_v} video")
         self.lbl_count.setText("  ·  ".join(parts) if parts else "Kosong")
         self._render_grid()
 
@@ -731,7 +780,9 @@ class GalleryPanel(QWidget):
             if self.filtered:
                 if self._subfolders: items.append(('s', "🖼️  Foto"))
                 for p in self.filtered:
-                    items.append(('p', p))
+                    # Bedakan tipe item untuk Delegate
+                    t = 'v' if 'duration' in p else 'p'
+                    items.append((t, p))
                     self.thumb_loader.request(p['path'])
         
         if not items:
@@ -1115,18 +1166,24 @@ class ListRow(QFrame):
 class LightboxClickableLabel(QLabel):
     clicked_at = Signal(QPoint)
     dragged = Signal(QPoint)
+    wheel_zoomed = Signal(int, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.zoom_enabled = False
-        self._last_pos = QPoint()
+        self._last_pos_global = QPoint() # Menggunakan posisi global untuk drag
         self._press_pos = QPoint()
         self._is_drag_mode = False
+        self.setMouseTracking(True)
+
+    def wheelEvent(self, event: QWheelEvent):
+        self.wheel_zoomed.emit(event.angleDelta().y(), event.position().toPoint())
+        event.accept() # Pastikan event tidak diteruskan ke parent
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = event.pos()
-            self._last_pos = event.pos()
+            self._last_pos_global = event.globalPos() # Inisialisasi posisi global
             self._is_drag_mode = False
             if self.zoom_enabled:
                 self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
@@ -1138,9 +1195,9 @@ class LightboxClickableLabel(QLabel):
             if (event.pos() - self._press_pos).manhattanLength() > 5:
                 self._is_drag_mode = True
             
-            delta = event.pos() - self._last_pos
+            delta = event.globalPos() - self._last_pos_global # Hitung delta dari posisi global
             self.dragged.emit(delta)
-            self._last_pos = event.pos()
+            self._last_pos_global = event.globalPos() # Perbarui baseline global
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1161,7 +1218,8 @@ class Lightbox(QDialog):
     def __init__(self, photos: list[dict], index: int, parent=None, source="gallery"):
         super().__init__(parent)
         self.photos=photos; self.current=index; self.source=source
-        self._zoom_level = 0  # 0: Fit, 1: 100%
+        self._zoom_level = 0  # 0: Fit, 1: 100%, 2: Manual
+        self._scale_factor = 1.0
         self._zoom_allowed = False
         
         # Pastikan dialog bisa menerima input keyboard dengan baik
@@ -1200,11 +1258,14 @@ class Lightbox(QDialog):
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll.setStyleSheet("background:transparent;")
-        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.scroll.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        if HAS_OPENGL:
+            self.scroll.setViewport(QOpenGLWidget())
+            self.scroll.viewport().setUpdateBehavior(QOpenGLWidget.UpdateBehavior.PartialUpdate)
 
         self.img=LightboxClickableLabel()
         self.img.clicked_at.connect(self._on_click_zoom)
+        self.img.wheel_zoomed.connect(self._on_wheel_zoom)
         self.img.dragged.connect(self._on_drag)
         self.img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.img.setStyleSheet("background:transparent;")
@@ -1222,6 +1283,11 @@ class Lightbox(QDialog):
         bp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bn=QPushButton("Berikutnya  ▶"); bn.setStyleSheet(BTN); bn.clicked.connect(self._next)
         bn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        
+        self._smooth_timer = QTimer(self)
+        self._smooth_timer.setSingleShot(True)
+        self._smooth_timer.timeout.connect(self._apply_smooth_scale)
+        self._original_pixmap = QPixmap()
 
         BL.addWidget(bp); BL.addWidget(bn); BL.addStretch()
         self.lbl_meta=QLabel(""); self.lbl_meta.setStyleSheet("color:#5a5a90;font-size:11px;")
@@ -1238,33 +1304,99 @@ class Lightbox(QDialog):
         if p.get('camera'):     parts.append(p['camera'])
         if p.get('img_w'):      parts.append(f"{p['img_w']}×{p.get('img_h','')}")
         self.lbl_meta.setText("  ·  ".join(parts))
-        pix=QPixmap(p['path'])
-        if not pix.isNull():
-            w=self.scroll.viewport().width(); h=self.scroll.viewport().height()
-            
-            # Zoom diaktifkan hanya jika resolusi gambar melebihi resolusi monitor
-            self._zoom_allowed = pix.width() > w or pix.height() > h
-            self.img.zoom_enabled = self._zoom_allowed
+        
+        if self._original_pixmap.isNull() or self._original_pixmap.cacheKey() != p.get('_ckey'):
+            self._original_pixmap = QPixmap(p['path'])
+            p['_ckey'] = self._original_pixmap.cacheKey()
 
-            if not self._zoom_allowed:
-                self._zoom_level = 0
-                self.img.setCursor(Qt.CursorShape.ArrowCursor)
-                scaled = pix
-            else:
-                if self._zoom_level == 0:
-                    self.img.setCursor(Qt.CursorShape.PointingHandCursor)
-                    scaled = pix.scaled(w,h,Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation)
-                else:
-                    self.img.setCursor(Qt.CursorShape.OpenHandCursor)
-                    scaled = pix
-            
-            self.img.setPixmap(scaled)
+        if not self._original_pixmap.isNull():
+            self._update_display()
         else:
             self.img.setText("⚠️ Tidak bisa memuat gambar")
 
+    def _update_display(self, mode=Qt.TransformationMode.SmoothTransformation):
+        w = self.scroll.viewport().width()
+        h = self.scroll.viewport().height()
+        self._zoom_allowed = self._original_pixmap.width() > w or self._original_pixmap.height() > h
+        self.img.zoom_enabled = self._zoom_allowed
+
+        if not self._zoom_allowed:
+            self._zoom_level = 0
+            self.img.setCursor(Qt.CursorShape.ArrowCursor)
+            scaled = self._original_pixmap
+        else:
+            if self._zoom_level == 0:
+                self.img.setCursor(Qt.CursorShape.PointingHandCursor)
+                scaled = self._original_pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, mode)
+            elif self._zoom_level == 1:
+                self.img.setCursor(Qt.CursorShape.OpenHandCursor)
+                scaled = self._original_pixmap
+            else: # Manual
+                self.img.setCursor(Qt.CursorShape.OpenHandCursor)
+                scaled = self._original_pixmap.scaled(self._original_pixmap.size() * self._scale_factor, 
+                                                      Qt.AspectRatioMode.KeepAspectRatio, mode)
+        
+        self.img.setPixmap(scaled)
+
+    def _on_wheel_zoom(self, delta: int, pos: QPoint):
+        if self._original_pixmap.isNull(): return
+        
+        vw, vh = self.scroll.viewport().width(), self.scroll.viewport().height()
+        pw, ph = self._original_pixmap.width(), self._original_pixmap.height()
+        fit_scale = min(vw / pw, vh / ph)
+
+        # SINKRONISASI: Pastikan _scale_factor mengikuti _zoom_level terakhir (klik 100% dll)
+        if self._zoom_level != 2:
+            if self._zoom_level == 0:
+                self._scale_factor = fit_scale
+            elif self._zoom_level == 1:
+                self._scale_factor = 1.0
+            self._zoom_level = 2
+
+        # Ambil anchor point relatif terhadap viewport
+        viewport_pos = self.scroll.viewport().mapFromGlobal(QCursor.pos())
+        
+        scroll_h = self.scroll.horizontalScrollBar()
+        scroll_v = self.scroll.verticalScrollBar()
+
+        # Hitung offset pemusatan saat ini
+        pix_w, pix_h = self.img.pixmap().width(), self.img.pixmap().height()
+        off_x = max(0, (self.img.width() - pix_w) // 2)
+        off_y = max(0, (self.img.height() - pix_h) // 2)
+
+        content_x = (scroll_h.value() + viewport_pos.x() - off_x) / self._scale_factor
+        content_y = (scroll_v.value() + viewport_pos.y() - off_y) / self._scale_factor
+
+        zoom_step = 1.15 if delta > 0 else 0.85
+
+        # Batasi zoom in maksimal ke 300% (3.0) atau fit_scale jika gambar sangat kecil
+        self._scale_factor = max(fit_scale * 0.9, min(self._scale_factor * zoom_step, max(3.0, fit_scale)))
+
+        if self._scale_factor <= fit_scale * 1.01:
+            self._zoom_level = 0
+            self._show()
+            return
+
+        self._update_display(Qt.TransformationMode.FastTransformation)
+        
+        # Koreksi scroll dengan offset baru setelah perbesaran
+        new_pw = int(self._original_pixmap.width() * self._scale_factor)
+        new_ph = int(self._original_pixmap.height() * self._scale_factor)
+        new_label_w = max(vw, new_pw)
+        new_label_h = max(vh, new_ph)
+        new_off_x = max(0, (new_label_w - new_pw) // 2)
+        new_off_y = max(0, (new_label_h - new_ph) // 2)
+
+        scroll_h.setValue(int(content_x * self._scale_factor + new_off_x - viewport_pos.x()))
+        scroll_v.setValue(int(content_y * self._scale_factor + new_off_y - viewport_pos.y()))
+
+        self._smooth_timer.start(200)
+
+    def _apply_smooth_scale(self):
+        self._update_display(Qt.TransformationMode.SmoothTransformation)
+
     def _on_click_zoom(self, pos: QPoint):
-        if not self.img.pixmap(): return
+        if self._original_pixmap.isNull(): return
 
         # Hitung koordinat relatif sebelum zoom berubah
         label_w, label_h = self.img.width(), self.img.height()
@@ -1299,8 +1431,6 @@ class Lightbox(QDialog):
         v_bar = self.scroll.verticalScrollBar()
         h_bar.setValue(h_bar.value() - delta.x())
         v_bar.setValue(v_bar.value() - delta.y())
-        # Update last_pos di label agar drag terasa mulus
-        self.img._last_pos = self.img.mapFromGlobal(QCursor.pos())
 
     def _prev(self):
         if self.current > 0:
