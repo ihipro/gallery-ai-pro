@@ -12,6 +12,12 @@ Fixes:
 import os
 import hashlib
 from pathlib import Path
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 from PIL import Image, ImageOps
 
 Image.MAX_IMAGE_PIXELS = 100_000_000  # Lindungi dari file yang terlalu besar 
@@ -30,6 +36,12 @@ def get_or_create_thumb(photo_path: str) -> str | None:
     cached = get_thumb_path(photo_path)
     if cached:
         return cached
+        
+    # Deteksi jika ini video
+    ext = os.path.splitext(photo_path)[1].lower()
+    if ext in {'.mp4', '.mkv', '.mov', '.avi'}:
+        return _generate_video_thumb(photo_path)
+        
     return _generate_thumb(photo_path)
 
 
@@ -52,6 +64,33 @@ def _generate_thumb(photo_path: str) -> str | None:
     except Exception as e:
         print(f"[Thumbnailer] Error for {photo_path}: {e}")
         return None
+
+def _generate_video_thumb(video_path: str) -> str | None:
+    if not HAS_CV2: return None
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    thumb_path = str(THUMB_DIR / _thumb_filename(video_path))
+    
+    try:
+        cap = cv2.VideoCapture(video_path)
+        # Ambil frame pada detik ke-1 (1000ms) agar bukan layar hitam
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        success, frame = cap.read()
+        if not success: # Fallback ke frame pertama jika gagal
+            cap.set(cv2.CAP_PROP_POS_MSEC, 0)
+            success, frame = cap.read()
+        cap.release()
+
+        if success:
+            # Convert BGR (OpenCV) ke RGB (PIL)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            img.thumbnail(THUMB_SIZE, Image.Resampling.LANCZOS)
+            img.save(thumb_path, 'JPEG', quality=82, optimize=True)
+            save_thumb_path(video_path, thumb_path)
+            return thumb_path
+    except Exception as e:
+        print(f"[Thumbnailer] Video thumb error for {video_path}: {e}")
+    return None
 
 
 def generate_ai_blob(photo_path: str) -> str | None:
@@ -161,6 +200,7 @@ class ScannerSignals(QObject):
 
 class FolderScanWorker(QRunnable):
     IMAGE_EXT = {'.jpg','.jpeg','.png','.webp','.gif','.bmp','.tiff','.tif','.heic'}
+    VIDEO_EXT = {'.mp4', '.mkv', '.mov', '.avi'}
 
     def __init__(self, folder: str, signals: ScannerSignals):
         super().__init__()
@@ -178,44 +218,54 @@ class FolderScanWorker(QRunnable):
         Subfolders are shown as navigable cards; user double-clicks into them.
         finished() always emits so the UI progress bar always clears.
         """
-        from core.database import get_photos_in_folder, upsert_photos_batch
+        from core.database import get_photos_in_folder, upsert_photos_batch, upsert_videos_batch
         done = 0
         try:
             all_entries = []
             try:
                 for entry in os.scandir(self.folder):
-                    if (entry.is_file(follow_symlinks=False)
-                            and os.path.splitext(entry.name)[1].lower() in self.IMAGE_EXT):
-                        all_entries.append(entry)
+                    if entry.is_file(follow_symlinks=False):
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in self.IMAGE_EXT or ext in self.VIDEO_EXT:
+                            all_entries.append(entry)
             except PermissionError:
                 pass
             all_entries.sort(key=lambda entry: entry.path)
 
             total = len(all_entries)
+            # Untuk kesederhanaan tahap awal, kita hanya skip cache untuk foto dulu
             existing_by_path = {
                 photo["path"]: photo
                 for photo in get_photos_in_folder(self.folder)
             }
 
             batch_to_upsert = []
+            video_batch = []
             for entry in all_entries:
                 if self._cancelled:
                     break
                 path = entry.path
                 try:
                     stat = entry.stat(follow_symlinks=False)
-                    existing = existing_by_path.get(path)
-                    if (existing
-                            and int(existing.get("file_size", 0)) == int(stat.st_size)
-                            and abs(float(existing.get("modified_at", 0)) - float(stat.st_mtime)) < 0.001):
-                        meta = existing
-                    else:
-                        meta = self._read_meta(path, stat)
-                        batch_to_upsert.append(meta)
-
-                    if len(batch_to_upsert) >= 50:
-                        upsert_photos_batch(batch_to_upsert)
-                        batch_to_upsert = []
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    
+                    if ext in self.IMAGE_EXT:
+                        existing = existing_by_path.get(path)
+                        if (existing and int(existing.get("file_size", 0)) == int(stat.st_size)
+                                and abs(float(existing.get("modified_at", 0)) - float(stat.st_mtime)) < 0.001):
+                            meta = existing
+                        else:
+                            meta = self._read_meta(path, stat)
+                            batch_to_upsert.append(meta)
+                        if len(batch_to_upsert) >= 50:
+                            upsert_photos_batch(batch_to_upsert)
+                            batch_to_upsert = []
+                    else: # Video
+                        meta = self._read_video_meta(path, stat)
+                        video_batch.append(meta)
+                        if len(video_batch) >= 50:
+                            upsert_videos_batch(video_batch)
+                            video_batch = []
 
                     # Thumbnail generation is intentionally NOT called here.
                     # ThumbLoader handles it async when cards are displayed.
@@ -235,6 +285,8 @@ class FolderScanWorker(QRunnable):
 
             if batch_to_upsert:
                 upsert_photos_batch(batch_to_upsert)
+            if video_batch:
+                upsert_videos_batch(video_batch)
 
         except Exception as e:
             print(f"[Scanner] Fatal error: {e}")
@@ -338,6 +390,41 @@ class FolderScanWorker(QRunnable):
         except Exception as e:
             print(f"[Scanner] EXIF read error {path}: {e}")
 
+        return meta
+
+    def _read_video_meta(self, path: str, stat=None) -> dict:
+        from datetime import datetime
+        if stat is None: stat = os.stat(path)
+        name = os.path.basename(path)
+        meta = {
+            'path': path,
+            'uid': f"vid_{name}_{stat.st_size}_{int(stat.st_mtime)}",
+            'name': name,
+            'folder': str(Path(path).parent),
+            'file_size': stat.st_size,
+            'modified_at': stat.st_mtime,
+            'added_at': datetime.now().isoformat(),
+            'duration': 0, 'width': 0, 'height': 0, 'codec': ''
+        }
+        if not HAS_CV2: return meta
+
+        try:
+            cap = cv2.VideoCapture(path)
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if fps > 0:
+                    meta['duration'] = frame_count / fps
+                meta['width'] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                meta['height'] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                
+                # Mencoba mendapatkan codec (fourcc)
+                fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+                codec = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
+                meta['codec'] = codec.strip()
+                cap.release()
+        except Exception as e:
+            print(f"[Scanner] Video meta error {path}: {e}")
         return meta
 
     @staticmethod
