@@ -70,6 +70,21 @@ def init_db():
             exif_data   TEXT    DEFAULT '{}'
         );
 
+        CREATE TABLE IF NOT EXISTS videos (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            path        TEXT    UNIQUE NOT NULL,
+            uid         TEXT    UNIQUE,
+            name        TEXT    NOT NULL,
+            folder      TEXT    NOT NULL,
+            file_size   INTEGER DEFAULT 0,
+            modified_at REAL    DEFAULT 0,
+            duration    REAL    DEFAULT 0,
+            width       INTEGER DEFAULT 0,
+            height      INTEGER DEFAULT 0,
+            codec       TEXT,
+            added_at    TEXT    NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS thumb_cache (
             photo_path  TEXT PRIMARY KEY,
             thumb_path  TEXT NOT NULL,
@@ -89,6 +104,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_photos_ai       ON photos(ai_tagged);
         CREATE INDEX IF NOT EXISTS idx_photos_fav      ON photos(fav);
         CREATE INDEX IF NOT EXISTS idx_photos_added    ON photos(added_at);
+
+        CREATE INDEX IF NOT EXISTS idx_videos_folder   ON videos(folder);
+        CREATE INDEX IF NOT EXISTS idx_videos_added    ON videos(added_at);
+        CREATE INDEX IF NOT EXISTS idx_videos_path     ON videos(path);
     """)
 
         cols = {row["name"] for row in cur.execute("PRAGMA table_info(photos)").fetchall()}
@@ -269,6 +288,46 @@ def upsert_photos_batch(photos: list[dict]):
         cur.executemany(query, data_list)
         conn.commit()
 
+def upsert_videos_batch(videos: list[dict]):
+    """Memasukkan banyak data video sekaligus dalam satu transaksi."""
+    if not videos:
+        return
+
+    query = """
+        INSERT INTO videos
+            (path, uid, name, folder, file_size, modified_at, duration, width, height, codec, added_at)
+        VALUES
+            (:path, :uid, :name, :folder, :file_size, :modified_at, :duration, :width, :height, :codec, :added_at)
+        ON CONFLICT(path) DO UPDATE SET
+            file_size   = excluded.file_size,
+            modified_at = excluded.modified_at,
+            duration    = excluded.duration,
+            width       = excluded.width,
+            height      = excluded.height,
+            codec       = excluded.codec
+    """
+    with db_session() as conn:
+        cur = conn.cursor()
+        now = datetime.now().isoformat()
+        data_list = []
+        for v in videos:
+            d = {
+                'path':        v['path'],
+                'uid':         v.get('uid'),
+                'name':        v.get('name', os.path.basename(v['path'])),
+                'folder':      v.get('folder', str(Path(v['path']).parent)),
+                'file_size':   int(v.get('file_size', 0)),
+                'modified_at': float(v.get('modified_at', 0)),
+                'duration':    float(v.get('duration', 0)),
+                'width':       int(v.get('width', 0)),
+                'height':      int(v.get('height', 0)),
+                'codec':       v.get('codec', ''),
+                'added_at':    v.get('added_at', now)
+            }
+            data_list.append(d)
+        cur.executemany(query, data_list)
+        conn.commit()
+
 def normalize_tags(res: dict) -> dict:
     """
     Python implementation of web version's applyResFields().
@@ -303,6 +362,17 @@ def get_photos_in_folder(folder: str) -> list[dict]:
         rows = cur.fetchall()
         return [_row_to_dict(r) for r in rows]
 
+def get_videos_in_folder(folder: str) -> list[dict]:
+    """Ambil daftar video langsung di dalam folder (non-rekursif)."""
+    with db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT * FROM videos
+            WHERE folder = ?
+            ORDER BY added_at DESC
+        """, (folder,))
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
 def get_gps_photos_with_thumbs(col_prefix: str) -> list[dict]:
     """Optimized query: Ambil semua data GPS dan Thumb dalam satu kali join."""
